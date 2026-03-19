@@ -107,12 +107,26 @@ def _load_dwsim() -> bool:
         if DWSIM_PATH not in _path_env.split(os.pathsep):
             os.environ["PATH"] = DWSIM_PATH + os.pathsep + _path_env
 
-        # Load .NET runtime
+        # Load .NET runtime.
+        #
+        # DWSIM.Thermodynamics.dll (and others) reference System.Windows.Forms,
+        # which lives in Microsoft.WindowsDesktop.App — NOT in the base coreclr
+        # (Microsoft.NETCore.App).  Loading just "coreclr" without specifying
+        # the desktop framework causes GetExportedTypes() to fail with
+        # "Could not load System.Windows.Forms", which pythonnet silently
+        # swallows → empty namespace index → "No module named DWSIM.*".
+        #
+        # Fix: pass DWSIM's own runtimeconfig.json so pythonnet loads the
+        # Windows Desktop runtime that includes System.Windows.Forms.
         try:
             from pythonnet import load as _pn_load  # type: ignore
-            _pn_load("coreclr")
+            _rtconfig = os.path.join(DWSIM_PATH, "DWSIM.UI.Desktop.runtimeconfig.json")
+            if os.path.isfile(_rtconfig):
+                _pn_load("coreclr", runtime_config=_rtconfig)
+            else:
+                _pn_load("coreclr")
         except Exception:
-            pass  # older pythonnet auto-loads
+            pass  # older pythonnet auto-loads, or runtime already initialised
 
         import clr  # type: ignore
         import System  # type: ignore  (always available with coreclr)
