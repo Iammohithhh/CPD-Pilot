@@ -109,22 +109,39 @@ def _load_dwsim() -> bool:
 
         # Load .NET runtime.
         #
-        # DWSIM.Thermodynamics.dll (and others) reference System.Windows.Forms,
-        # which lives in Microsoft.WindowsDesktop.App — NOT in the base coreclr
-        # (Microsoft.NETCore.App).  Loading just "coreclr" without specifying
-        # the desktop framework causes GetExportedTypes() to fail with
-        # "Could not load System.Windows.Forms", which pythonnet silently
-        # swallows → empty namespace index → "No module named DWSIM.*".
+        # DWSIM.Thermodynamics.dll references System.Windows.Forms 4.0.0.0,
+        # which in .NET 8 is provided by Microsoft.WindowsDesktop.App — NOT
+        # the base Microsoft.NETCore.App that "coreclr" loads by default.
+        # Without WindowsDesktop, Assembly.GetExportedTypes() throws
+        # ReflectionTypeLoadException; pythonnet swallows it silently and
+        # returns an empty namespace → "No module named 'DWSIM.Thermodynamics'".
         #
-        # Fix: pass DWSIM's own runtimeconfig.json so pythonnet loads the
-        # Windows Desktop runtime that includes System.Windows.Forms.
+        # DWSIM.UI.Desktop.runtimeconfig.json mistakenly requests NETCore.App,
+        # so we generate a small runtimeconfig.json that correctly asks for
+        # Microsoft.WindowsDesktop.App (which IS installed at 8.0.11).
         try:
+            import json as _json
             from pythonnet import load as _pn_load  # type: ignore
-            _rtconfig = os.path.join(DWSIM_PATH, "DWSIM.UI.Desktop.runtimeconfig.json")
-            if os.path.isfile(_rtconfig):
-                _pn_load("coreclr", runtime_config=_rtconfig)
-            else:
-                _pn_load("coreclr")
+
+            _rtconfig_path = os.path.join(
+                os.environ.get("TEMP", os.path.expanduser("~")),
+                "dwsim_windesktop.runtimeconfig.json",
+            )
+            with open(_rtconfig_path, "w") as _rf:
+                _json.dump(
+                    {
+                        "runtimeOptions": {
+                            "tfm": "net8.0-windows",
+                            "framework": {
+                                "name": "Microsoft.WindowsDesktop.App",
+                                "version": "8.0.0",
+                            },
+                            "rollForward": "LatestPatch",
+                        }
+                    },
+                    _rf,
+                )
+            _pn_load("coreclr", runtime_config=_rtconfig_path)
         except Exception:
             pass  # older pythonnet auto-loads, or runtime already initialised
 
