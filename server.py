@@ -8,6 +8,17 @@ Exposes the following tools to Claude:
     • list_available_processes   — list all chemicals in the library
     • get_process_summary        — human-readable summary card
 
+  INPUT HANDLING:
+    • parse_process_request      — parse natural language descriptions
+    • extract_pfd_from_image     — extract process data from PFD image
+
+  PFD GENERATION:
+    • generate_pfd               — create text + graphviz PFD diagrams
+
+  WEB SEARCH (for chemicals not in library):
+    • search_chemical_process    — search web for industrial process info
+    • build_custom_process       — build process dict from Claude's knowledge
+
   DWSIM SIMULATION (requires DWSIM installation):
     • dwsim_status               — check if DWSIM is available
     • create_flowsheet           — create flowsheet with compounds + thermo model
@@ -19,6 +30,11 @@ Exposes the following tools to Claude:
     • get_unit_op_results        — read duty, ΔP etc. from unit operations
     • save_flowsheet             — save to .dwxmz file
     • build_process_from_library — one-shot: build + run + save from library
+
+  REPORTING:
+    • generate_mass_balance      — formatted mass balance table
+    • generate_energy_balance    — formatted energy balance table
+    • generate_full_report       — comprehensive simulation report
 
 Usage:
     python server.py                  (stdio — for Claude Desktop / Claude Code)
@@ -36,6 +52,11 @@ from mcp.server.fastmcp import FastMCP
 
 import process_library as _lib
 import dwsim_tools as _dwsim
+import web_search as _ws
+import pfd_parser as _pfd
+import pfd_generator as _pfg
+import input_handler as _inp
+import balance_reporter as _bal
 
 # ─────────────────────────────────────────────
 # Create MCP server instance
@@ -45,9 +66,14 @@ mcp = FastMCP(
     "CPD-Pilot",
     instructions=(
         "You are a Chemical Process Design assistant. "
-        "Use the process library tools to look up industrial synthesis routes, "
-        "then use the DWSIM simulation tools to build and run process simulations. "
-        "Always look up the process first, then construct the simulation step by step."
+        "When a user requests a process, follow this workflow:\n"
+        "1. Parse their input with parse_process_request (handles natural language + flow rates)\n"
+        "2. If a PFD image is provided, extract it with extract_pfd_from_image\n"
+        "3. Look up the process in the library, or search the web if not found\n"
+        "4. Generate a PFD diagram for the student\n"
+        "5. Build and run the DWSIM simulation\n"
+        "6. Generate mass balance and energy balance reports\n"
+        "7. Present a comprehensive report with engineering tables"
     ),
 )
 
@@ -145,6 +171,473 @@ def get_process_summary(
     lines.append(f"Notes: {data.get('notes', '')}")
 
     return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────
+# INPUT HANDLING TOOLS
+# ─────────────────────────────────────────────
+
+@mcp.tool()
+def parse_process_request(
+    user_input: Annotated[str, Field(
+        description=(
+            "The user's natural language description of the process they want. "
+            "Examples: 'produce ethanol at 500 kg/hr from ethylene', "
+            "'design ammonia plant 1000 tonnes/day', "
+            "'methanol from syngas at 80 bar and 250°C'"
+        )
+    )],
+) -> dict:
+    """
+    Parse a natural language process description into structured parameters.
+
+    Extracts:
+    - Target chemical name
+    - Production rate (auto-converts units to kg/hr)
+    - Feed temperature, pressure (auto-converts to SI)
+    - Feed composition (percentages)
+    - Catalyst mentions
+
+    Also checks if the chemical is in the built-in library and returns
+    the library data merged with user overrides if found.
+
+    Use this as the FIRST step when a user describes a process in plain English.
+    """
+    parsed = _inp.parse_user_input(user_input)
+    merged = _inp.merge_with_library(parsed)
+    return {
+        "parsed_input": parsed,
+        "merged_process": merged,
+        "next_steps": (
+            "If 'in_library' is True, use the merged_process directly with "
+            "build_process_from_library or generate_pfd. "
+            "If False, use search_chemical_process or build_custom_process "
+            "to create the process definition."
+        ),
+    }
+
+
+@mcp.tool()
+def extract_pfd_from_image(
+    image_path: Annotated[str, Field(
+        description=(
+            "Path to the PFD image file uploaded by the user. "
+            "Supports PNG, JPG, PDF formats."
+        )
+    )],
+    chemical_name: Annotated[str, Field(
+        description="Name of the target chemical (helps with validation)."
+    )] = "",
+    thermo_model: Annotated[str, Field(
+        description="Thermodynamic model to use (default: Peng-Robinson)."
+    )] = "Peng-Robinson",
+) -> dict:
+    """
+    Extract process data from a PFD (Process Flow Diagram) image.
+
+    This tool returns:
+    1. A structured prompt for Claude to analyze the image
+    2. Validation rules for the extracted data
+    3. A template to fill in
+
+    WORKFLOW:
+    - Call this tool to get the extraction prompt
+    - Then use Claude's vision to read the image and fill in the template
+    - Pass the filled data back to validate_pfd_data to check and clean it
+    """
+    prompt = _pfd.get_extraction_prompt()
+    template = _ws.get_empty_template()
+
+    return {
+        "extraction_prompt": prompt,
+        "empty_template": template,
+        "image_path": image_path,
+        "chemical_name": chemical_name,
+        "thermo_model": thermo_model,
+        "instructions": (
+            "1. Read the image at the given path using the Read tool\n"
+            "2. Use the extraction_prompt to analyze the PFD\n"
+            "3. Fill in the template with extracted data\n"
+            "4. Call validate_pfd_data with the filled template\n"
+            "5. Use the validated data with build_custom_process or DWSIM tools"
+        ),
+    }
+
+
+@mcp.tool()
+def validate_pfd_data(
+    extracted_data: Annotated[dict, Field(
+        description="The PFD data extracted by Claude from the image."
+    )],
+    chemical_name: Annotated[str, Field(
+        description="Target chemical name."
+    )] = "",
+    thermo_model: Annotated[str, Field(
+        description="Thermodynamic model to use."
+    )] = "Peng-Robinson",
+) -> dict:
+    """
+    Validate and clean PFD data extracted from an image.
+
+    Checks unit operation types, stream tags, connections, and normalizes
+    equipment type names to DWSIM-compatible values.
+
+    Returns the cleaned data ready for simulation, plus any warnings.
+    """
+    validation = _pfd.validate_extracted_pfd(extracted_data)
+    process_dict = _pfd.pfd_to_process_dict(
+        validation["cleaned_data"],
+        chemical_name=chemical_name,
+        thermo_model=thermo_model,
+    )
+    return {
+        "valid": validation["valid"],
+        "warnings": validation["warnings"],
+        "process_data": process_dict,
+    }
+
+
+# ─────────────────────────────────────────────
+# PFD GENERATION TOOLS
+# ─────────────────────────────────────────────
+
+@mcp.tool()
+def generate_pfd(
+    chemical: Annotated[str, Field(
+        description=(
+            "Chemical name to generate PFD for. "
+            "Must be in the library or provide process_data directly."
+        )
+    )],
+    output_dir: Annotated[str | None, Field(
+        description="Directory to save PFD files (DOT + PNG). Default: outputs/"
+    )] = None,
+) -> dict:
+    """
+    Generate a Process Flow Diagram for a chemical process.
+
+    Returns:
+    - text_pfd: ASCII art PFD for terminal display
+    - dot_source: Graphviz DOT source for rendering
+    - dot_path: path to saved .dot file
+    - png_path: path to rendered PNG (if graphviz installed)
+
+    The text PFD is always available. The graphviz PNG requires
+    the 'dot' command to be installed.
+    """
+    process_data = _lib.lookup_process(chemical)
+    if not process_data.get("found"):
+        return {
+            "success": False,
+            "error": f"Chemical '{chemical}' not found in library.",
+            "available": _lib.list_available_processes(),
+        }
+
+    out = output_dir or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "outputs"
+    )
+    result = _pfg.generate_pfd(process_data, out)
+    result["success"] = True
+    return result
+
+
+@mcp.tool()
+def generate_pfd_from_data(
+    process_data: Annotated[dict, Field(
+        description=(
+            "Process data dict (from parse_process_request, validate_pfd_data, "
+            "or build_custom_process). Must have unit_operations, streams, connections."
+        )
+    )],
+    output_dir: Annotated[str | None, Field(
+        description="Directory to save PFD files. Default: outputs/"
+    )] = None,
+) -> dict:
+    """
+    Generate a PFD from arbitrary process data (not just library chemicals).
+
+    Use this after building a custom process or extracting from a PFD image.
+    Returns text PFD + graphviz DOT source + file paths.
+    """
+    out = output_dir or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "outputs"
+    )
+    result = _pfg.generate_pfd(process_data, out)
+    result["success"] = True
+    return result
+
+
+# ─────────────────────────────────────────────
+# WEB SEARCH / CUSTOM PROCESS TOOLS
+# ─────────────────────────────────────────────
+
+@mcp.tool()
+def search_chemical_process(
+    chemical: Annotated[str, Field(
+        description="Name of the chemical to search for (e.g. 'styrene', 'formaldehyde')."
+    )],
+    search_text: Annotated[str, Field(
+        description=(
+            "Raw text from web search results about the industrial process. "
+            "Paste the relevant search results here."
+        )
+    )] = "",
+) -> dict:
+    """
+    Parse web search results about a chemical process into structured data.
+
+    Use this when the chemical is NOT in the built-in library:
+    1. First search the web for '{chemical} industrial production process'
+    2. Pass the search results text to this tool
+    3. The tool extracts temperatures, pressures, catalysts, conversions
+    4. Claude should then review and complete the partial data
+
+    Returns a partially-filled process dict that Claude should complete
+    before passing to DWSIM simulation tools.
+    """
+    result = _ws.parse_web_search_to_process(chemical, search_text)
+    result["recommended_thermo_model"] = _ws.recommend_thermo_model(
+        result.get("compounds", [])
+    )
+    return result
+
+
+@mcp.tool()
+def build_custom_process(
+    chemical_name: Annotated[str, Field(
+        description="Name of the target chemical."
+    )],
+    route_name: Annotated[str, Field(
+        description="Industrial route name (e.g. 'Ethylbenzene Dehydrogenation')."
+    )],
+    description: Annotated[str, Field(
+        description="Process description paragraph."
+    )],
+    reactions: Annotated[list[dict], Field(
+        description=(
+            "List of reaction dicts. Each must have: equation, type "
+            "(ConversionReactor/EquilibriumReactor), temperature_C, pressure_bar. "
+            "Optional: conversion (0-1), catalyst."
+        )
+    )],
+    compounds: Annotated[list[str], Field(
+        description="List of compound names (must match DWSIM database)."
+    )],
+    thermo_model: Annotated[str, Field(
+        description="Thermodynamic model (Peng-Robinson, NRTL, SRK, etc.)."
+    )],
+    unit_operations: Annotated[list[dict], Field(
+        description=(
+            "List of unit op dicts. Each must have: type, name, purpose. "
+            "Type must be one of the valid DWSIM types."
+        )
+    )],
+    streams: Annotated[list[dict], Field(
+        description=(
+            "List of feed stream dicts. Each must have: name, type (material/energy), "
+            "T_C, P_bar, total_flow_kg_hr, composition (dict of compound: mole_frac)."
+        )
+    )],
+    connections: Annotated[list[list[str]], Field(
+        description="List of [from_tag, to_tag] pairs for wiring the flowsheet."
+    )],
+    notes: Annotated[str, Field(
+        description="Additional process notes."
+    )] = "",
+) -> dict:
+    """
+    Build a complete process definition from scratch.
+
+    Use this when the chemical is NOT in the built-in library and you have
+    gathered enough information (from web search or Claude's knowledge)
+    to define the full process.
+
+    Returns a process_library-compatible dict ready for DWSIM simulation,
+    PFD generation, or balance reporting.
+    """
+    return _ws.build_process_from_description(
+        chemical_name=chemical_name,
+        route_name=route_name,
+        description=description,
+        reactions=reactions,
+        compounds=compounds,
+        thermo_model=thermo_model,
+        unit_operations=unit_operations,
+        streams=streams,
+        connections=[tuple(c) for c in connections],
+        notes=notes,
+    )
+
+
+# ─────────────────────────────────────────────
+# REPORTING TOOLS
+# ─────────────────────────────────────────────
+
+@mcp.tool()
+def generate_mass_balance(
+    stream_results: Annotated[dict, Field(
+        description=(
+            "Stream results dict from get_stream_results(). "
+            "Keys are stream tags, values have T_K, P_Pa, mass_flow_kg_hr, "
+            "mole_fractions, mass_fractions."
+        )
+    )],
+    compounds: Annotated[list[str], Field(
+        description="List of compound names in the simulation."
+    )],
+) -> dict:
+    """
+    Generate formatted mass balance tables from simulation results.
+
+    Returns:
+    - overall_table: formatted text table showing T, P, flow, composition for all streams
+    - component_table: formatted text table showing mass flow of each compound per stream
+    - data: structured dict with computed component flows and totals
+
+    Present both tables to the student for their CPD assignment.
+    """
+    overall = _bal.format_mass_balance(stream_results, compounds)
+    component = _bal.format_component_balance(stream_results, compounds)
+    data = _bal.compute_mass_balance_data(stream_results, compounds)
+
+    return {
+        "overall_table": overall,
+        "component_table": component,
+        "data": data,
+    }
+
+
+@mcp.tool()
+def generate_energy_balance(
+    unit_op_results: Annotated[dict, Field(
+        description=(
+            "Unit op results dict from get_unit_op_results(). "
+            "Keys are equipment tags, values have duty_kW, delta_P_Pa, etc."
+        )
+    )],
+    process_data: Annotated[dict | None, Field(
+        description="Optional process data dict for equipment names/purposes."
+    )] = None,
+) -> dict:
+    """
+    Generate formatted energy balance table from simulation results.
+
+    Returns:
+    - table: formatted text table with equipment duties, ΔP, and energy summary
+    - data: structured dict with heating/cooling/work totals and
+            heat integration potential
+
+    The energy summary includes:
+    - Total heating duty (kW)
+    - Total cooling duty (kW)
+    - Total shaft work (kW)
+    - Net energy input (kW)
+    - Heat integration potential (kW)
+    """
+    table = _bal.format_energy_balance(unit_op_results, process_data)
+    data = _bal.compute_energy_balance_data(unit_op_results, process_data)
+
+    return {
+        "table": table,
+        "data": data,
+    }
+
+
+@mcp.tool()
+def generate_full_report(
+    chemical: Annotated[str, Field(
+        description="Chemical name (used to look up process data)."
+    )],
+    stream_results: Annotated[dict | None, Field(
+        description="Stream results from simulation (optional — omit for pre-simulation report)."
+    )] = None,
+    unit_op_results: Annotated[dict | None, Field(
+        description="Unit op results from simulation (optional)."
+    )] = None,
+) -> dict:
+    """
+    Generate a comprehensive simulation report with process overview,
+    mass balance, and energy balance.
+
+    Can be called:
+    - WITHOUT simulation results → generates a pre-simulation summary
+    - WITH simulation results → generates a full post-simulation report
+
+    Returns a formatted report string suitable for display to students.
+    """
+    process_data = _lib.lookup_process(chemical)
+    if not process_data.get("found"):
+        return {"success": False, "error": f"Chemical '{chemical}' not found."}
+
+    report = _bal.format_summary_report(
+        process_data,
+        stream_results=stream_results,
+        unit_op_results=unit_op_results,
+    )
+
+    result: dict = {
+        "success": True,
+        "report": report,
+    }
+
+    # Add balance tables if results provided
+    if stream_results:
+        compounds = process_data.get("compounds", [])
+        result["mass_balance_table"] = _bal.format_mass_balance(
+            stream_results, compounds
+        )
+        result["component_balance_table"] = _bal.format_component_balance(
+            stream_results, compounds
+        )
+
+    if unit_op_results:
+        result["energy_balance_table"] = _bal.format_energy_balance(
+            unit_op_results, process_data
+        )
+
+    return result
+
+
+@mcp.tool()
+def generate_full_report_from_data(
+    process_data: Annotated[dict, Field(
+        description="Process data dict (from library, web search, or PFD extraction)."
+    )],
+    stream_results: Annotated[dict | None, Field(
+        description="Stream results from simulation (optional)."
+    )] = None,
+    unit_op_results: Annotated[dict | None, Field(
+        description="Unit op results from simulation (optional)."
+    )] = None,
+) -> dict:
+    """
+    Generate a full report from arbitrary process data (not just library chemicals).
+
+    Same as generate_full_report but accepts custom process data directly.
+    """
+    report = _bal.format_summary_report(
+        process_data,
+        stream_results=stream_results,
+        unit_op_results=unit_op_results,
+    )
+
+    result: dict = {"success": True, "report": report}
+
+    if stream_results:
+        compounds = process_data.get("compounds", [])
+        result["mass_balance_table"] = _bal.format_mass_balance(
+            stream_results, compounds
+        )
+        result["component_balance_table"] = _bal.format_component_balance(
+            stream_results, compounds
+        )
+
+    if unit_op_results:
+        result["energy_balance_table"] = _bal.format_energy_balance(
+            unit_op_results, process_data
+        )
+
+    return result
 
 
 # ─────────────────────────────────────────────
