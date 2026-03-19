@@ -101,6 +101,12 @@ def _load_dwsim() -> bool:
             import pythoncom  # type: ignore
             pythoncom.CoInitialize()
 
+        # CRITICAL: set working directory and sys.path BEFORE loading the CLR
+        # so that .NET can resolve transitive assembly dependencies at load time.
+        os.chdir(DWSIM_PATH)
+        if DWSIM_PATH not in sys.path:
+            sys.path.insert(0, DWSIM_PATH)
+
         # Load .NET runtime
         try:
             from pythonnet import load as _pn_load  # type: ignore
@@ -109,7 +115,6 @@ def _load_dwsim() -> bool:
             pass  # older pythonnet auto-loads
 
         import clr  # type: ignore
-        from System.IO import Directory  # type: ignore
 
         required_dlls = [
             "CapeOpen.dll",
@@ -126,8 +131,6 @@ def _load_dwsim() -> bool:
             full_path = os.path.join(DWSIM_PATH, dll)
             if os.path.isfile(full_path):
                 clr.AddReference(full_path)
-
-        Directory.SetCurrentDirectory(DWSIM_PATH)
 
         # Import DWSIM namespaces
         from DWSIM.Automation import Automation3 as _A3  # type: ignore
