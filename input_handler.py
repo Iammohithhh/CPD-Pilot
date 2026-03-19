@@ -107,7 +107,9 @@ _FLOW_PATTERN = re.compile(
 )
 
 _TEMP_PATTERN = re.compile(
-    r'(\d+\.?\d*)\s*°?\s*(C|F|K|celsius|fahrenheit|kelvin|deg\s*[CFK])',
+    r'(\d+\.?\d*)\s*°\s*(C|F|K)|'
+    r'(\d+\.?\d*)\s*(celsius|fahrenheit|kelvin|deg\s*[CFK])|'
+    r'(\d+\.?\d*)\s*(°C|°F|°K)',
     re.IGNORECASE
 )
 
@@ -117,7 +119,8 @@ _PRESSURE_PATTERN = re.compile(
 )
 
 _COMPOSITION_PATTERN = re.compile(
-    r'(\d+\.?\d*)\s*%\s*(\w[\w\s]*?)(?:\s+feed|\s+in|\s*,|\s*and\s|\s*\+|\s*$)',
+    r'(\d+\.?\d*)\s*%\s*(\w+(?:\s+\w+)?)'
+    r'(?=\s+feed|\s+in\b|\s*,|\s+and\s|\s*\+|\s+at\s|\s*$)',
     re.IGNORECASE
 )
 
@@ -188,8 +191,16 @@ def parse_user_input(text: str) -> dict:
     # ─── Extract temperature ───
     temp_match = _TEMP_PATTERN.search(text)
     if temp_match:
-        value = float(temp_match.group(1))
-        unit = temp_match.group(2)
+        # Pattern has 3 alternations; find which matched
+        if temp_match.group(1) is not None:
+            value = float(temp_match.group(1))
+            unit = temp_match.group(2)
+        elif temp_match.group(3) is not None:
+            value = float(temp_match.group(3))
+            unit = temp_match.group(4)
+        else:
+            value = float(temp_match.group(5))
+            unit = temp_match.group(6)
         t_k = _to_kelvin(value, unit)
         result["feed_temperature_K"] = t_k
         result["extraction_notes"].append(
@@ -331,7 +342,8 @@ def merge_with_library(parsed_input: dict) -> dict:
             "parsed_input": parsed_input,
         }
 
-    process = dict(parsed_input["library_data"])
+    import copy
+    process = copy.deepcopy(parsed_input["library_data"])
 
     # Override production rate → scale all feed streams proportionally
     user_rate = parsed_input.get("production_rate_kg_hr")

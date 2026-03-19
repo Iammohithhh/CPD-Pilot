@@ -608,7 +608,8 @@ def lookup_process(chemical: str) -> dict:
     key = aliases.get(key, key)
 
     if key in PROCESS_LIBRARY:
-        process = PROCESS_LIBRARY[key]
+        import copy
+        process = copy.deepcopy(PROCESS_LIBRARY[key])
         return {
             "found": True,
             "chemical": key,

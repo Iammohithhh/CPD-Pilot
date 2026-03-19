@@ -230,18 +230,14 @@ def format_energy_balance(
 
         # Categorise duties
         if duty is not None:
-            if eq_type in ("Heater", "Heater", "ConversionReactor", "EquilibriumReactor"):
-                if duty > 0:
-                    total_heating += duty
-                else:
-                    total_cooling += abs(duty)
-            elif eq_type in ("Cooler",):
+            if eq_type in ("Cooler",):
                 total_cooling += abs(duty)
             elif eq_type in ("Pump", "Compressor"):
                 total_work += abs(duty)
             elif eq_type in ("Expander",):
                 total_work -= abs(duty)  # recovered
             else:
+                # Heaters, reactors, and anything else
                 if duty > 0:
                     total_heating += duty
                 else:

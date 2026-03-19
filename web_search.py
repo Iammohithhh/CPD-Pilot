@@ -170,22 +170,29 @@ def recommend_thermo_model(compounds: list[str], pressure_bar: float = 1.0) -> s
         "ethanol", "methanol", "acetone", "acetic acid", "phenol",
         "isopropanol", "butanol", "glycol", "ethylene glycol",
     ])
-    all_hydrocarbons = all(c in lower_compounds for c in lower_compounds) and all(
-        any(kw in c for kw in ["ane", "ene", "yne", "benzene", "toluene", "xylene",
-                                "hexane", "pentane", "butane", "propane", "methane",
-                                "ethane", "naphthalene"])
+    hydrocarbon_keywords = [
+        "ane", "ene", "yne", "benzene", "toluene", "xylene",
+        "hexane", "pentane", "butane", "propane", "methane",
+        "ethane", "naphthalene",
+    ]
+    all_hydrocarbons = all(
+        any(kw in c for kw in hydrocarbon_keywords)
         for c in lower_compounds
     )
     only_water = lower_compounds == ["water"]
     has_acid = any("acid" in c for c in lower_compounds)
+    has_electrolytes = any(
+        kw in c for c in lower_compounds
+        for kw in ["ion", "sodium", "potassium", "chloride", "sulfate"]
+    )
 
     if only_water:
         return "Steam Tables"
     if has_water and has_organics:
         return "NRTL"
-    if has_acid:
+    if has_acid or has_electrolytes:
         return "NRTL"
-    if has_water and has_organics:
+    if has_water and not has_organics and not all_hydrocarbons:
         return "UNIQUAC"
     if all_hydrocarbons or pressure_bar > 10:
         return "Peng-Robinson"

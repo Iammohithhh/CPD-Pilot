@@ -469,6 +469,12 @@ def run_simulation(timeout_seconds: int = 120) -> dict:
 
         Settings.SolverMode = 0  # synchronous
 
+        if timeout_seconds and timeout_seconds > 0:
+            try:
+                _interf.CalculateFlowsheet3(_sim, timeout_seconds)
+            except Exception:
+                pass  # fall through to CalculateFlowsheet4
+
         errors = _interf.CalculateFlowsheet4(_sim)
 
         error_list = []
@@ -600,7 +606,9 @@ def save_flowsheet(file_path: str, compressed: bool = True) -> dict:
         return {"success": False, "error": "DWSIM interface not initialised."}
 
     try:
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        dir_part = os.path.dirname(file_path)
+        if dir_part:
+            os.makedirs(dir_part, exist_ok=True)
         _interf.SaveFlowsheet(_sim, file_path, compressed)
         return {"success": True, "saved_to": file_path}
     except Exception as exc:
