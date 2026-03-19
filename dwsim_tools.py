@@ -101,11 +101,12 @@ def _load_dwsim() -> bool:
             import pythoncom  # type: ignore
             pythoncom.CoInitialize()
 
-        # CRITICAL: set working directory and sys.path BEFORE loading the CLR
-        # so that .NET can resolve transitive assembly dependencies at load time.
+        # Set working directory BEFORE loading the CLR so that .NET can resolve
+        # transitive assembly dependencies at load time.
+        # Do NOT add DWSIM_PATH to sys.path — the folder contains files that
+        # Python would import as a "DWSIM" package, shadowing the CLR namespace
+        # and breaking "from DWSIM.Thermodynamics import ..." imports.
         os.chdir(DWSIM_PATH)
-        if DWSIM_PATH not in sys.path:
-            sys.path.insert(0, DWSIM_PATH)
 
         # Load .NET runtime
         try:
