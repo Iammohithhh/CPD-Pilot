@@ -101,12 +101,14 @@ def _load_dwsim() -> bool:
             import pythoncom  # type: ignore
             pythoncom.CoInitialize()
 
-        # Set working directory BEFORE loading the CLR so that .NET can resolve
-        # transitive assembly dependencies at load time.
-        # Do NOT add DWSIM_PATH to sys.path — the folder contains files that
-        # Python would import as a "DWSIM" package, shadowing the CLR namespace
-        # and breaking "from DWSIM.Thermodynamics import ..." imports.
-        os.chdir(DWSIM_PATH)
+        # Add DWSIM_PATH to the OS PATH so Windows can find native DLLs
+        # (libSkiaSharp, CoolProp, etc.) without needing os.chdir.
+        # We avoid os.chdir because Python's '' entry in sys.path then points
+        # at E:\DWSIM, which may contain a Python 'DWSIM' package that shadows
+        # the CLR namespace and breaks "from DWSIM.Thermodynamics import ..." .
+        _path_env = os.environ.get("PATH", "")
+        if DWSIM_PATH not in _path_env.split(os.pathsep):
+            os.environ["PATH"] = DWSIM_PATH + os.pathsep + _path_env
 
         # Load .NET runtime
         try:
@@ -133,12 +135,27 @@ def _load_dwsim() -> bool:
             if os.path.isfile(full_path):
                 clr.AddReference(full_path)
 
-        # Import DWSIM namespaces
-        from DWSIM.Automation import Automation3 as _A3  # type: ignore
-        from DWSIM.Interfaces.Enums.GraphicObjects import ObjectType as _OT  # type: ignore
-        from DWSIM.Thermodynamics import PropertyPackages as _PP  # type: ignore
-        from DWSIM.UnitOperations import UnitOperations as _UO  # type: ignore
-        from DWSIM.GlobalSettings import Settings as _S  # type: ignore
+        # Purge any Python-level DWSIM module that may have been cached before
+        # (or during) assembly loading.  A stale Python 'DWSIM' module would
+        # shadow the CLR namespace and make sub-namespace imports fail.
+        for _k in list(sys.modules.keys()):
+            if _k == "DWSIM" or _k.startswith("DWSIM."):
+                del sys.modules[_k]
+
+        # Temporarily remove '' / '.' from sys.path so that Python does not
+        # resolve 'DWSIM' against the current directory (or any bundled
+        # Python packages inside E:\DWSIM) while the CLR imports run.
+        _saved_syspath = sys.path[:]
+        sys.path = [p for p in sys.path if p not in ("", ".")]
+        try:
+            # Import DWSIM namespaces via the CLR import hook
+            from DWSIM.Automation import Automation3 as _A3  # type: ignore
+            from DWSIM.Interfaces.Enums.GraphicObjects import ObjectType as _OT  # type: ignore
+            from DWSIM.Thermodynamics import PropertyPackages as _PP  # type: ignore
+            from DWSIM.UnitOperations import UnitOperations as _UO  # type: ignore
+            from DWSIM.GlobalSettings import Settings as _S  # type: ignore
+        finally:
+            sys.path = _saved_syspath
 
         Automation3 = _A3
         ObjectType = _OT
