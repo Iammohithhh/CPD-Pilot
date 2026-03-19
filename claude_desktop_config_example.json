@@ -1,0 +1,15 @@
+{
+  "_comment": "Add this block to your Claude Desktop config at:",
+  "_comment_mac": "~/Library/Application Support/Claude/claude_desktop_config.json",
+  "_comment_win": "%APPDATA%\\Claude\\claude_desktop_config.json",
+  "_comment2": "Set DWSIM_PATH to where DWSIM.Automation.dll lives (optional but needed for simulation)",
+  "mcpServers": {
+    "cpd-pilot": {
+      "command": "python3",
+      "args": ["/absolute/path/to/CPD-Pilot/server.py"],
+      "env": {
+        "DWSIM_PATH": "C:\\Users\\YourUser\\AppData\\Local\\DWSIM"
+      }
+    }
+  }
+}
