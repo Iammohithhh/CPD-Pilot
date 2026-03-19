@@ -101,11 +101,8 @@ def _load_dwsim() -> bool:
             import pythoncom  # type: ignore
             pythoncom.CoInitialize()
 
-        # Add DWSIM_PATH to the OS PATH so Windows can find native DLLs
-        # (libSkiaSharp, CoolProp, etc.) without needing os.chdir.
-        # We avoid os.chdir because Python's '' entry in sys.path then points
-        # at E:\DWSIM, which may contain a Python 'DWSIM' package that shadows
-        # the CLR namespace and breaks "from DWSIM.Thermodynamics import ..." .
+        # Add DWSIM_PATH to OS PATH so Windows finds native DLLs
+        # (libSkiaSharp, CoolProp, etc.) during P/Invoke calls.
         _path_env = os.environ.get("PATH", "")
         if DWSIM_PATH not in _path_env.split(os.pathsep):
             os.environ["PATH"] = DWSIM_PATH + os.pathsep + _path_env
@@ -118,6 +115,28 @@ def _load_dwsim() -> bool:
             pass  # older pythonnet auto-loads
 
         import clr  # type: ignore
+        import System  # type: ignore  (always available with coreclr)
+
+        # Register an AssemblyResolve handler BEFORE loading DWSIM assemblies.
+        #
+        # When pythonnet enumerates types in a freshly-loaded assembly it calls
+        # Assembly.GetExportedTypes().  If any transitive dependency of that
+        # assembly is not yet in the load context, .NET raises a
+        # ReflectionTypeLoadException.  Pythonnet catches this silently and
+        # returns an empty type list, so the CLR namespace importer finds
+        # nothing and raises "No module named 'DWSIM.Thermodynamics'".
+        #
+        # The handler below resolves any unknown assembly to a DLL in
+        # DWSIM_PATH, turning transitive-dependency failures into successful
+        # loads so the type enumeration succeeds.
+        def _resolve_dwsim_assembly(sender, args):  # noqa: ANN001
+            short = args.Name.split(",")[0].strip()
+            candidate = os.path.join(DWSIM_PATH, short + ".dll")
+            if os.path.isfile(candidate):
+                return System.Reflection.Assembly.LoadFrom(candidate)
+            return None  # let .NET fall through to its normal search
+
+        System.AppDomain.CurrentDomain.AssemblyResolve += _resolve_dwsim_assembly
 
         required_dlls = [
             "CapeOpen.dll",
@@ -135,27 +154,12 @@ def _load_dwsim() -> bool:
             if os.path.isfile(full_path):
                 clr.AddReference(full_path)
 
-        # Purge any Python-level DWSIM module that may have been cached before
-        # (or during) assembly loading.  A stale Python 'DWSIM' module would
-        # shadow the CLR namespace and make sub-namespace imports fail.
-        for _k in list(sys.modules.keys()):
-            if _k == "DWSIM" or _k.startswith("DWSIM."):
-                del sys.modules[_k]
-
-        # Temporarily remove '' / '.' from sys.path so that Python does not
-        # resolve 'DWSIM' against the current directory (or any bundled
-        # Python packages inside E:\DWSIM) while the CLR imports run.
-        _saved_syspath = sys.path[:]
-        sys.path = [p for p in sys.path if p not in ("", ".")]
-        try:
-            # Import DWSIM namespaces via the CLR import hook
-            from DWSIM.Automation import Automation3 as _A3  # type: ignore
-            from DWSIM.Interfaces.Enums.GraphicObjects import ObjectType as _OT  # type: ignore
-            from DWSIM.Thermodynamics import PropertyPackages as _PP  # type: ignore
-            from DWSIM.UnitOperations import UnitOperations as _UO  # type: ignore
-            from DWSIM.GlobalSettings import Settings as _S  # type: ignore
-        finally:
-            sys.path = _saved_syspath
+        # Import DWSIM namespaces via the CLR import hook
+        from DWSIM.Automation import Automation3 as _A3  # type: ignore
+        from DWSIM.Interfaces.Enums.GraphicObjects import ObjectType as _OT  # type: ignore
+        from DWSIM.Thermodynamics import PropertyPackages as _PP  # type: ignore
+        from DWSIM.UnitOperations import UnitOperations as _UO  # type: ignore
+        from DWSIM.GlobalSettings import Settings as _S  # type: ignore
 
         Automation3 = _A3
         ObjectType = _OT
