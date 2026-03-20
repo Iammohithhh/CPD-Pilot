@@ -584,6 +584,182 @@ PROCESS_LIBRARY = {
     },
 
     # ──────────────────────────────────────────────────────────────────────────
+    "cyclohexane": {
+        "name": "Cyclohexane Production",
+        "route": "Benzene Hydrogenation with Sulfolane Extractive Distillation",
+        "description": (
+            "Cyclohexane (98%+ purity) is produced by catalytic hydrogenation of benzene "
+            "over a supported nickel catalyst (Ni/Al2O3) at 200°C and 30 bar. "
+            "The reaction is highly exothermic (ΔH = -208 kJ/mol) with >99% selectivity. "
+            "Benzene/cyclohexane cannot be separated by conventional distillation "
+            "(near-azeotrope, relative volatility ≈1.02). Sulfolane extractive distillation "
+            "exploits sulfolane's affinity for the aromatic ring: cyclohexane leaves as "
+            "distillate while benzene is retained in the sulfolane bottoms. A second "
+            "column recovers the solvent. Unreacted H2 is recycled via a recycle compressor."
+        ),
+        "reactions": [
+            {
+                "equation": "Benzene + 3 Hydrogen → Cyclohexane",
+                "type": "ConversionReactor",
+                "conversion": 0.999,
+                "temperature_C": 200,
+                "pressure_bar": 30,
+                "catalyst": "Ni/Al2O3 (fixed bed)",
+            }
+        ],
+        "compounds": ["Benzene", "Hydrogen", "Cyclohexane", "Sulfolane"],
+        "thermo_model": "Peng-Robinson",
+        "unit_operations": [
+            # ── Feed section ──────────────────────────────────────────────────
+            {"type": "Pump",             "name": "P-01",
+             "purpose": "Centrifugal pump: pressurise benzene feed 1→30 bar"},
+            {"type": "Compressor",       "name": "K-02",
+             "purpose": "H2 feed compressor: 5→30 bar"},
+            {"type": "Mixer",            "name": "MIX-03",
+             "purpose": "Combine benzene (μ_11) + H2 (μ_21) feeds"},
+            # ── Reaction section ──────────────────────────────────────────────
+            {"type": "Heater",           "name": "H-04",
+             "purpose": "HEX 01: preheat mixed feed to 200°C using steam"},
+            {"type": "ConversionReactor","name": "R-05",
+             "purpose": "Fixed-bed Ni/Al2O3 reactor: C6H6 + 3H2→C6H12, 99.9% conv, 200°C 30 bar"},
+            {"type": "Cooler",           "name": "C-06",
+             "purpose": "HEX 02: cool reactor effluent from 200→40°C using cooling water"},
+            # ── Separation section ────────────────────────────────────────────
+            {"type": "Flash",            "name": "V-07",
+             "purpose": "High-pressure flash: separate unreacted H2 vapour from liquid CyHex"},
+            {"type": "Splitter",         "name": "SPL-08",
+             "purpose": "Vapour split: 10% purge (μ_81), 90% recycle to MIX-03 via K-19"},
+            {"type": "Compressor",       "name": "K-19",
+             "purpose": "Recycle compressor: recompress recycled H2 to 30 bar"},
+            {"type": "Valve",            "name": "VLV-09",
+             "purpose": "Pressure let-down: liquid from V-07 from 30→1.5 bar"},
+            # ── Extractive distillation section ───────────────────────────────
+            {"type": "ShortcutColumn",   "name": "T-10",
+             "purpose": (
+                 "Extractive distillation column: sulfolane solvent absorbs benzene. "
+                 "Distillate = cyclohexane product (μ_10.2). "
+                 "Bottoms = benzene + sulfolane (μ_10.1) → T-13."
+             )},
+            {"type": "ShortcutColumn",   "name": "T-13",
+             "purpose": (
+                 "Solvent recovery column: separate benzene from sulfolane. "
+                 "Distillate = recovered benzene (recycle to feed μ_14.1). "
+                 "Bottoms = regenerated sulfolane (recycle to T-10 μ_15.2)."
+             )},
+        ],
+        "streams": [
+            {
+                "name": "S-01", "type": "material",
+                "description": "Benzene feed (μ_01): fresh liquid benzene",
+                "T_C": 25, "P_bar": 1.013, "total_flow_kg_hr": 980,
+                "composition": {
+                    "Benzene": 1.0, "Hydrogen": 0.0,
+                    "Cyclohexane": 0.0, "Sulfolane": 0.0,
+                },
+            },
+            {
+                "name": "S-02", "type": "material",
+                "description": "H2 feed (μ_02): fresh hydrogen gas",
+                "T_C": 25, "P_bar": 5.0, "total_flow_kg_hr": 80,
+                "composition": {
+                    "Benzene": 0.0, "Hydrogen": 1.0,
+                    "Cyclohexane": 0.0, "Sulfolane": 0.0,
+                },
+            },
+            {
+                "name": "S-03", "type": "material",
+                "description": "Sulfolane solvent feed (μ_16): fresh make-up + recycle",
+                "T_C": 60, "P_bar": 1.5, "total_flow_kg_hr": 2000,
+                "composition": {
+                    "Benzene": 0.0, "Hydrogen": 0.0,
+                    "Cyclohexane": 0.0, "Sulfolane": 1.0,
+                },
+            },
+        ],
+        "connections": [
+            # ── Benzene: pump → mixer ─────────────────────────────────────────
+            ("S-01",    "P-01"),
+            ("P-01",    "MIX-03"),
+            # ── H2: compressor → mixer ────────────────────────────────────────
+            ("S-02",    "K-02"),
+            ("K-02",    "MIX-03"),
+            # ── Main reaction path ────────────────────────────────────────────
+            ("MIX-03",  "H-04"),
+            ("H-04",    "R-05"),
+            ("R-05",    "C-06"),
+            ("C-06",    "V-07"),
+            # ── Flash: VAPOUR outlet FIRST (port 1) → splitter ───────────────
+            # IMPORTANT: DWSIM assigns outlets in port order.
+            # V-07 port 1 = vapour → SPL-08; port 2 = liquid → VLV-09.
+            # Connections to a Flash must be ordered: vapour first, liquid second.
+            ("V-07",    "SPL-08"),   # vapour → H2 recycle/purge splitter
+            ("V-07",    "VLV-09"),   # liquid (cyclohexane) → pressure let-down
+            # ── H2 vapour recycle loop ────────────────────────────────────────
+            # SPL-08 port 0 (90%) → K-19 (recycle compressor) → MIX-03
+            # SPL-08 port 1 (10%) → purge (dead-end stream, no downstream)
+            ("SPL-08",  "K-19"),     # recycle fraction → compressor
+            ("K-19",    "MIX-03"),   # recompressed H2 → mixer (closes recycle)
+            # ── Liquid: valve → extractive distillation ───────────────────────
+            ("VLV-09",  "T-10"),     # depressurised liquid → column 1
+            ("S-03",    "T-10"),     # sulfolane solvent → column 1 (second feed)
+            # ── T-10: DISTILLATE first (port 0) → product; BOTTOMS (port 1) → T-13
+            # T-10 distillate = cyclohexane product (μ_10.2)
+            # T-10 bottoms    = benzene + sulfolane (μ_10.1) → T-13
+            ("T-10",    "T-13"),     # T-10 bottoms → solvent recovery column
+        ],
+        "unit_op_specs": {
+            # Feed section
+            "P-01":    {"outlet_P_bar": 30,  "efficiency": 0.75},
+            "K-02":    {"outlet_P_bar": 30,  "efficiency": 0.75},
+            # Reaction section
+            "H-04":    {"outlet_T_C": 200},
+            # ConversionReactor: outlet_T_C sets CalcMode=1 (isothermal).
+            # This removes the energy-stream connection requirement entirely.
+            "R-05":    {"outlet_T_C": 200},
+            "C-06":    {"outlet_T_C": 40},
+            # Flash
+            "V-07":    {"P_bar": 30, "T_C": 40},
+            # Recycle split: 90% recycle, 10% purge
+            "SPL-08":  {"split_fraction": 0.90},
+            "K-19":    {"outlet_P_bar": 30, "efficiency": 0.75},
+            # Valve: 30 bar → 1.5 bar before distillation
+            "VLV-09":  {"outlet_P_bar": 1.5},
+            # T-10: Extractive distillation (cyclohexane / benzene split)
+            # Cyclohexane is lighter than benzene in presence of sulfolane
+            "T-10": {
+                "light_key": "Cyclohexane",  "heavy_key": "Benzene",
+                "light_key_recovery": 0.99,  "heavy_key_recovery": 0.99,
+                "reflux_ratio": 5.0,
+                "condenser_P_bar": 1.5,
+                "reboiler_P_bar": 1.8,
+                "condenser_type": 0,          # total condenser
+            },
+            # T-13: Solvent recovery (benzene / sulfolane split)
+            # Low pressure needed — sulfolane bp 285°C, vacuum avoids degradation
+            "T-13": {
+                "light_key": "Benzene",    "heavy_key": "Sulfolane",
+                "light_key_recovery": 0.99, "heavy_key_recovery": 0.99,
+                "reflux_ratio": 2.0,
+                "condenser_P_bar": 0.15,   # ~150 mbar vacuum
+                "reboiler_P_bar": 0.20,
+                "condenser_type": 0,
+            },
+        },
+        "notes": (
+            "Cyclohexane/benzene relative volatility ≈ 1.02 at 1 atm — impossible to "
+            "separate by conventional distillation. Sulfolane (bp 285°C, S/F ratio ~4:1) "
+            "raises benzene relative volatility to ~2.5.\n\n"
+            "Simulation is open-loop in the sulfolane recycle (T-13 bottoms are not "
+            "connected back to T-10 in this automated build; close this loop in the "
+            "DWSIM GUI by connecting T-13 bottoms to T-10 solvent inlet).\n\n"
+            "H2 recycle is closed (K-19 → MIX-03). SPL-08 purge stream (port 1) is a "
+            "dead-end — connect to a product stream in GUI if purge rates are needed.\n\n"
+            "Sulfolane DWSIM name: try 'Sulfolane', 'Tetramethylene sulfone', or CAS 126-33-0 "
+            "if the compound is not found in the database."
+        ),
+    },
+
+    # ──────────────────────────────────────────────────────────────────────────
     "hydrogen": {
         "name": "Hydrogen Production",
         "route": "Steam Methane Reforming (SMR)",
