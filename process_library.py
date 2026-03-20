@@ -62,6 +62,7 @@ PROCESS_LIBRARY = {
         "connections": [
             # (from_stream_or_unit, to_stream_or_unit)
             ("S-01", "MIX-101"),
+            ("S-02", "MIX-101"),   # water feed into mixer (was missing!)
             ("MIX-101", "H-101"),
             ("H-101", "R-101"),
             ("R-101", "C-101"),

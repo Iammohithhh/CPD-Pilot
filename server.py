@@ -314,16 +314,19 @@ def generate_pfd(
     )] = None,
 ) -> dict:
     """
-    Generate a Process Flow Diagram for a chemical process.
+    Generate a Process Flow Diagram for a chemical process in multiple formats.
 
-    Returns:
-    - text_pfd: ASCII art PFD for terminal display
-    - dot_source: Graphviz DOT source for rendering
-    - dot_path: path to saved .dot file
-    - png_path: path to rendered PNG (if graphviz installed)
+    Always returns:
+    - text_pfd:    ASCII art PFD — show this in a code block in chat
+    - mermaid_pfd: Mermaid flowchart — paste in a ```mermaid block to render
+    - svg_pfd:     Full SVG source — save as .svg and open in any browser
+    - svg_path:    path to the saved .svg file
+    - dot_source:  Graphviz DOT source
+    - dot_path:    path to saved .dot file
+    - png_path:    path to rendered PNG (only if graphviz is installed)
 
-    The text PFD is always available. The graphviz PNG requires
-    the 'dot' command to be installed.
+    The SVG is the most portable download format: no dependencies, opens in
+    Chrome/Edge/Firefox and can be imported into Visio/PowerPoint/Word.
     """
     process_data = _lib.lookup_process(chemical)
     if not process_data.get("found"):
@@ -877,6 +880,35 @@ def build_process_from_library(
         os.path.dirname(os.path.abspath(__file__)), "outputs"
     )
     return _dwsim.build_process_from_library(process_data, default_output)
+
+
+@mcp.tool()
+def setup_reactions(
+    chemical: Annotated[str, Field(
+        description=(
+            "Chemical name whose reaction definitions should be loaded. "
+            "Looks up the process library and creates DWSIM Reaction + ReactionSet objects, "
+            "then assigns them to the reactor unit ops in the active flowsheet."
+        )
+    )],
+) -> dict:
+    """
+    Create reaction sets for the active flowsheet from the process library.
+
+    Call this after create_flowsheet + add_unit_operation but BEFORE run_simulation.
+    Without a reaction set, ConversionReactor / EquilibriumReactor cannot converge
+    and their blocks stay red (unsolved) in DWSIM.
+
+    Returns success flag, reaction IDs created, and which reactors were assigned.
+    """
+    process_data = _lib.lookup_process(chemical)
+    if not process_data.get("found"):
+        return {
+            "success": False,
+            "error": f"Chemical '{chemical}' not in library.",
+            "available": _lib.list_available_processes(),
+        }
+    return _dwsim.setup_reactions(process_data)
 
 
 # ─────────────────────────────────────────────

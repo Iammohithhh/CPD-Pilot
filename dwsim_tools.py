@@ -22,6 +22,7 @@ import os
 import sys
 import json
 import traceback
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -790,6 +791,233 @@ def load_flowsheet(file_path: str) -> dict:
         return {"success": False, "error": str(exc)}
 
 
+def setup_reactions(process_data: dict) -> dict:
+    """
+    Create DWSIM reaction objects from process_library reaction specs and assign
+    them to the reactor unit operations in the current flowsheet.
+
+    DWSIM's ConversionReactor requires:
+      1. A Reaction object with stoichiometry + conversion spec
+      2. A ReactionSet containing that reaction
+      3. The reactor's ReactionSetID pointing at that set
+
+    Without this, the reactor cannot converge and all downstream objects stay red.
+
+    Args:
+        process_data: dict from process_library with 'reactions', 'compounds',
+                      'unit_operations' keys
+
+    Returns dict with success flag and details.
+    """
+    if _sim is None:
+        return {"success": False, "error": "No flowsheet active."}
+
+    reactions_data = process_data.get("reactions", [])
+    if not reactions_data:
+        return {"success": True, "message": "No reactions defined — skipping.", "added": 0}
+
+    compounds = process_data.get("compounds", [])
+    unit_ops   = process_data.get("unit_operations", [])
+
+    _reactor_types = {
+        "ConversionReactor", "EquilibriumReactor", "GibbsReactor", "CSTR", "PFR",
+    }
+    reactors = [op for op in unit_ops if op["type"] in _reactor_types]
+
+    try:
+        # ── 1. Import DWSIM reaction classes ──────────────────────────────────
+        _Rxn = _RStoich = _RxnSet = None
+
+        for mod_path in [
+            ("DWSIM.Thermodynamics.Reactions", "Reaction"),
+            ("DWSIM.SharedClasses.Utility",    "Reaction"),
+            ("DWSIM.SharedClasses",            "Reaction"),
+        ]:
+            try:
+                import importlib
+                mod = importlib.import_module(mod_path[0])
+                _Rxn = getattr(mod, mod_path[1])
+                break
+            except Exception:
+                pass
+
+        if _Rxn is None:
+            # Last-resort: try direct CLR import
+            try:
+                from DWSIM.Thermodynamics.Reactions import Reaction as _Rxn  # type: ignore
+            except Exception:
+                pass
+
+        for mod_path in [
+            ("DWSIM.Thermodynamics.Reactions", "ReactionStoichimetry"),
+            ("DWSIM.SharedClasses.Utility",    "ReactionStoichimetry"),
+        ]:
+            try:
+                import importlib
+                mod = importlib.import_module(mod_path[0])
+                _RStoich = getattr(mod, mod_path[1])
+                break
+            except Exception:
+                pass
+
+        if _RStoich is None:
+            try:
+                from DWSIM.Thermodynamics.Reactions import ReactionStoichimetry as _RStoich  # type: ignore
+            except Exception:
+                pass
+
+        for mod_path in [
+            ("DWSIM.SharedClasses.Utility", "ReactionSet"),
+            ("DWSIM.SharedClasses",         "ReactionSet"),
+        ]:
+            try:
+                import importlib
+                mod = importlib.import_module(mod_path[0])
+                _RxnSet = getattr(mod, mod_path[1])
+                break
+            except Exception:
+                pass
+
+        if _RxnSet is None:
+            try:
+                from DWSIM.SharedClasses.Utility import ReactionSet as _RxnSet  # type: ignore
+            except Exception:
+                pass
+
+        if _Rxn is None or _RxnSet is None:
+            return {
+                "success": False,
+                "error": (
+                    "Could not import DWSIM reaction classes. "
+                    "Reactions not added — simulator may not converge."
+                ),
+            }
+
+        # ── 2. Build one ReactionSet for all reactions ────────────────────────
+        rxnset = _RxnSet()
+        rxnset_id = str(uuid.uuid4())
+        rxnset.ID   = rxnset_id
+        rxnset.Name = f"{process_data.get('chemical', 'Process')} Reactions"
+
+        added = []
+
+        for i, rxn_data in enumerate(reactions_data):
+            try:
+                rxn = _Rxn()
+                rxn_id   = str(uuid.uuid4())
+                rxn.ID   = rxn_id
+                rxn.Name = rxn_data.get("equation", f"Reaction {i+1}")
+
+                # ── Reaction type ───────────────────────────────────────────
+                rxn_type = rxn_data.get("type", "ConversionReactor")
+                if rxn_type == "ConversionReactor":
+                    try:
+                        from DWSIM.Thermodynamics.Reactions import ReactionType as _RT  # type: ignore
+                        rxn.ReactionType = _RT.Conversion
+                    except Exception:
+                        try:
+                            rxn.ReactionType = 0          # 0 = Conversion in DWSIM enum
+                        except Exception:
+                            pass
+
+                # ── Conversion spec ─────────────────────────────────────────
+                conversion = float(rxn_data.get("conversion", 0.05))
+                for attr in ("Spec", "XFix", "ConversionSpec", "X_Conversion"):
+                    try:
+                        setattr(rxn, attr, conversion)
+                    except Exception:
+                        pass
+
+                # ── Stoichiometry ────────────────────────────────────────────
+                # Parse "A + B → C + D" style equations
+                equation = rxn_data.get("equation", "")
+                reactant_str, product_str = "", ""
+                for sep in ["→", "->"]:
+                    if sep in equation:
+                        reactant_str, product_str = equation.split(sep, 1)
+                        break
+
+                base_set = False
+
+                def _add_stoich(term_str: str, sign: int) -> None:
+                    """Add stoichiometry for one side of the equation."""
+                    nonlocal base_set
+                    for term in term_str.split("+"):
+                        term = term.strip()
+                        for cname in compounds:
+                            if cname in term:
+                                try:
+                                    coeff_raw = term.replace(cname, "").strip()
+                                    coeff = float(coeff_raw) if coeff_raw else 1.0
+                                except ValueError:
+                                    coeff = 1.0
+
+                                if _RStoich is not None:
+                                    try:
+                                        rs = _RStoich()
+                                        rs.CompoundName   = cname
+                                        rs.StoichCoeff    = sign * coeff
+                                        rs.IsBaseReactant = (sign < 0 and not base_set)
+                                        if rs.IsBaseReactant:
+                                            rxn.BaseReactant = cname
+                                            base_set = True
+                                        rxn.Components.Add(cname, rs)
+                                    except Exception:
+                                        pass
+                                break  # found compound for this term
+
+                if reactant_str:
+                    _add_stoich(reactant_str, -1)
+                if product_str:
+                    _add_stoich(product_str, +1)
+
+                # ── Add reaction to flowsheet ────────────────────────────────
+                _sim.Reactions.Add(rxn_id, rxn)
+
+                # ── Add reaction ID to the reaction set ──────────────────────
+                try:
+                    rxnset.Reactions.Add(rxn_id, True)
+                except Exception:
+                    try:
+                        rxnset.Reactions[rxn_id] = True
+                    except Exception:
+                        pass
+
+                added.append({"id": rxn_id, "name": rxn.Name, "conversion": conversion})
+
+            except Exception as exc:
+                added.append({"error": str(exc), "rxn_index": i})
+
+        # ── 3. Add reaction set to flowsheet ──────────────────────────────────
+        _sim.ReactionSets.Add(rxnset_id, rxnset)
+
+        # ── 4. Assign reaction set to all reactors ────────────────────────────
+        assigned_to = []
+        for reactor_op in reactors:
+            tag = reactor_op["name"]
+            obj = _object_registry.get(tag)
+            if obj is not None:
+                try:
+                    obj.ReactionSetID = rxnset_id
+                    assigned_to.append(tag)
+                except Exception as exc:
+                    assigned_to.append(f"{tag} (assign failed: {exc})")
+
+        return {
+            "success": True,
+            "reaction_set_id": rxnset_id,
+            "reactions_added": added,
+            "assigned_to_reactors": assigned_to,
+        }
+
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+        }
+
+
 def build_process_from_library(process_data: dict, output_dir: str | None = None) -> dict:
     """
     High-level function: build and run a complete simulation from a
@@ -858,6 +1086,10 @@ def build_process_from_library(process_data: dict, output_dir: str | None = None
     # Step 6: wire up connections
     r = connect_all(process_data["connections"])
     steps.append({"step": "connect_objects", **r})
+
+    # Step 6b: create reaction sets and assign to reactors
+    r = setup_reactions(process_data)
+    steps.append({"step": "setup_reactions", **r})
 
     # Step 7: run simulation
     r = run_simulation()
