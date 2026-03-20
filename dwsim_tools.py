@@ -22,6 +22,7 @@ import os
 import sys
 import json
 import traceback
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -790,6 +791,457 @@ def load_flowsheet(file_path: str) -> dict:
         return {"success": False, "error": str(exc)}
 
 
+def configure_unit_operation(tag: str, specs: dict) -> dict:
+    """
+    Set operating specs on any unit operation in the active flowsheet.
+
+    Works for ANY process — library or custom.  Just pass the tag and a flat
+    dict of spec keys.  Unknown keys are silently skipped; multiple fallback
+    property names are tried for each spec so it stays robust across DWSIM
+    versions.
+
+    Supported spec keys
+    ───────────────────
+    Heater / Cooler
+        outlet_T_C   float  Outlet temperature in °C
+        outlet_T_K   float  Outlet temperature in K
+        duty_kW      float  Heat duty in kW (positive = add heat)
+        delta_P_bar  float  Pressure drop across unit in bar
+
+    Compressor / Pump / Expander
+        outlet_P_bar float  Outlet pressure in bar
+        outlet_P_Pa  float  Outlet pressure in Pa
+        efficiency   float  Isentropic efficiency 0–1
+
+    Flash / Vessel / Separator
+        P_bar        float  Flash pressure in bar
+        T_C          float  Flash temperature in °C (PT flash)
+        vapor_frac   float  Vapour fraction 0–1 (PV flash, use instead of T_C)
+
+    Valve
+        outlet_P_bar float  Outlet pressure in bar
+
+    ShortcutColumn / DistillationColumn / AbsorptionColumn
+        light_key            str    Light-key compound name
+        heavy_key            str    Heavy-key compound name
+        light_key_recovery   float  Mole-fraction recovery of light key in distillate
+        heavy_key_recovery   float  Mole-fraction recovery of heavy key in bottoms
+        reflux_ratio         float  Operating reflux ratio (must be > min reflux)
+        num_stages           int    Number of theoretical stages
+        condenser_P_bar      float  Condenser pressure in bar
+        reboiler_P_bar       float  Reboiler pressure in bar
+        condenser_type       int    0 = total condenser (default), 1 = partial
+
+    Args:
+        tag:   Tag of the unit operation in the active flowsheet.
+        specs: Dict of spec key → value (see above).
+
+    Returns dict with success flag, tag, and list of properties applied/failed.
+    """
+    if _sim is None:
+        return {"success": False, "error": "No flowsheet active."}
+    if tag not in _object_registry:
+        return {"success": False, "error": f"Tag '{tag}' not found in flowsheet."}
+
+    obj = _object_registry[tag]
+    applied: list[str] = []
+    skipped: list[str] = []
+
+    def _try_set(attr_names, value, label: str) -> bool:
+        """Try setting `value` on the first matching attribute in attr_names."""
+        for a in attr_names:
+            try:
+                setattr(obj, a, value)
+                applied.append(f"{label} → {a}={value}")
+                return True
+            except Exception:
+                pass
+        skipped.append(f"{label}: none of {attr_names} accepted value {value}")
+        return False
+
+    # ── Detect object type ────────────────────────────────────────────────────
+    obj_type = ""
+    try:
+        obj_type = obj.GraphicObject.ObjectType.ToString()
+    except Exception:
+        try:
+            obj_type = type(obj).__name__
+        except Exception:
+            pass
+
+    # ── Heater / Cooler ───────────────────────────────────────────────────────
+    if obj_type in ("Heater", "Cooler") or "eater" in obj_type or "ooler" in obj_type:
+        if "outlet_T_C" in specs or "outlet_T_K" in specs:
+            T_K = (specs["outlet_T_K"] if "outlet_T_K" in specs
+                   else specs["outlet_T_C"] + 273.15)
+            # CalcMode 0 = specify outlet temperature
+            _try_set(["CalcMode"], 0, "CalcMode=OutletTemp")
+            _try_set(
+                ["DefinedTemperature", "OutletTemperature", "Tout", "Temperature"],
+                T_K, "outlet_T_K",
+            )
+        if "duty_kW" in specs:
+            _try_set(["CalcMode"], 1, "CalcMode=Duty")
+            _try_set(["DeltaQ", "HeatDuty", "Duty"], specs["duty_kW"] * 1000, "duty_W")
+        if "delta_P_bar" in specs:
+            _try_set(["DeltaP", "PressureDrop"], specs["delta_P_bar"] * 1e5, "delta_P_Pa")
+
+    # ── Compressor / Pump / Expander ──────────────────────────────────────────
+    elif obj_type in ("Compressor", "Pump", "Expander") or any(
+        k in obj_type for k in ("ompressor", "ump", "xpander")
+    ):
+        if "outlet_P_bar" in specs or "outlet_P_Pa" in specs:
+            P_Pa = (specs["outlet_P_Pa"] if "outlet_P_Pa" in specs
+                    else specs["outlet_P_bar"] * 1e5)
+            _try_set(["CalcMode"], 0, "CalcMode=OutletPressure")
+            _try_set(["POut", "OutletPressure", "Pout"], P_Pa, "outlet_P_Pa")
+        if "efficiency" in specs:
+            eff = specs["efficiency"]
+            _try_set(
+                ["AdiabaticEfficiency", "Eficiencia",
+                 "IsentropicEfficiency", "Efficiency"],
+                eff, "efficiency",
+            )
+
+    # ── Valve ─────────────────────────────────────────────────────────────────
+    elif obj_type == "Valve" or "alve" in obj_type:
+        if "outlet_P_bar" in specs or "outlet_P_Pa" in specs:
+            P_Pa = (specs["outlet_P_Pa"] if "outlet_P_Pa" in specs
+                    else specs["outlet_P_bar"] * 1e5)
+            _try_set(["POut", "OutletPressure", "Pout"], P_Pa, "outlet_P_Pa")
+
+    # ── Flash / Vessel / Separator ────────────────────────────────────────────
+    elif obj_type in ("Vessel", "Tank", "Flash") or any(
+        k in obj_type for k in ("essel", "lash", "eparator")
+    ):
+        if "P_bar" in specs:
+            P_Pa = specs["P_bar"] * 1e5
+            _try_set(["FlashPressure", "Pressure", "OperatingPressure"], P_Pa, "P_Pa")
+        if "T_C" in specs:
+            T_K = specs["T_C"] + 273.15
+            # PT flash
+            _try_set(["FlashType", "CalculationMode"], 1, "FlashType=PT")
+            _try_set(["FlashTemperature", "Temperature", "OperatingTemperature"],
+                     T_K, "T_K")
+        elif "vapor_frac" in specs:
+            # PV flash
+            _try_set(["FlashType", "CalculationMode"], 0, "FlashType=PV")
+            _try_set(["VaporFraction", "VF"], specs["vapor_frac"], "vapor_frac")
+
+    # ── ShortcutColumn / DistillationColumn / AbsorptionColumn ───────────────
+    elif any(k in obj_type for k in ("Column", "hortcut", "istillation", "bsorption")):
+        if "light_key" in specs:
+            _try_set(
+                ["LightKeyCompound", "LightKey", "ReferenceComponent"],
+                specs["light_key"], "light_key",
+            )
+        if "heavy_key" in specs:
+            _try_set(
+                ["HeavyKeyCompound", "HeavyKey"],
+                specs["heavy_key"], "heavy_key",
+            )
+        if "light_key_recovery" in specs:
+            _try_set(
+                ["LightKeyMoleFractionSpec", "LightKeyRecovery",
+                 "ReferenceComponentRecovery", "LKRecovery"],
+                specs["light_key_recovery"], "light_key_recovery",
+            )
+        if "heavy_key_recovery" in specs:
+            _try_set(
+                ["HeavyKeyMoleFractionSpec", "HeavyKeyRecovery", "HKRecovery"],
+                specs["heavy_key_recovery"], "heavy_key_recovery",
+            )
+        if "reflux_ratio" in specs:
+            _try_set(
+                ["RefluxRatio", "ActualRefluxRatio", "RR"],
+                specs["reflux_ratio"], "reflux_ratio",
+            )
+        if "num_stages" in specs:
+            _try_set(
+                ["NumberOfStages", "NumberOfTheoreticalStages", "N"],
+                int(specs["num_stages"]), "num_stages",
+            )
+        if "condenser_type" in specs:
+            _try_set(["CondenserType"], int(specs["condenser_type"]), "condenser_type")
+        if "condenser_P_bar" in specs:
+            P_Pa = specs["condenser_P_bar"] * 1e5
+            _try_set(
+                ["CondenserPressure", "Pcondens", "Pcond"],
+                P_Pa, "condenser_P_Pa",
+            )
+        if "reboiler_P_bar" in specs:
+            P_Pa = specs["reboiler_P_bar"] * 1e5
+            _try_set(
+                ["ReboilerPressure", "Preboiler", "Preb"],
+                P_Pa, "reboiler_P_Pa",
+            )
+
+    else:
+        # Unknown type — try to apply any numeric specs by common attr names
+        for key, val in specs.items():
+            skipped.append(f"{key}: unrecognised unit op type '{obj_type}'")
+
+    return {
+        "success": True,
+        "tag": tag,
+        "unit_op_type": obj_type,
+        "applied": applied,
+        "skipped": skipped,
+    }
+
+
+def configure_all_unit_ops(unit_op_specs: dict) -> dict:
+    """
+    Apply a full specs dict {tag: {spec_key: value, ...}} to the active flowsheet.
+
+    Calls configure_unit_operation() for every tag in unit_op_specs.
+    Used by build_process_from_library and can also be called directly.
+
+    Args:
+        unit_op_specs: e.g. {"H-101": {"outlet_T_C": 300}, "T-101": {...}}
+
+    Returns summary dict.
+    """
+    results = {}
+    for tag, specs in unit_op_specs.items():
+        results[tag] = configure_unit_operation(tag, specs)
+
+    success_count = sum(1 for r in results.values() if r.get("success"))
+    return {
+        "success": success_count == len(results),
+        "configured": success_count,
+        "failed": len(results) - success_count,
+        "details": results,
+    }
+
+
+def setup_reactions(process_data: dict) -> dict:
+    """
+    Create DWSIM reaction objects from process_library reaction specs and assign
+    them to the reactor unit operations in the current flowsheet.
+
+    DWSIM's ConversionReactor requires:
+      1. A Reaction object with stoichiometry + conversion spec
+      2. A ReactionSet containing that reaction
+      3. The reactor's ReactionSetID pointing at that set
+
+    Without this, the reactor cannot converge and all downstream objects stay red.
+
+    Args:
+        process_data: dict from process_library with 'reactions', 'compounds',
+                      'unit_operations' keys
+
+    Returns dict with success flag and details.
+    """
+    if _sim is None:
+        return {"success": False, "error": "No flowsheet active."}
+
+    reactions_data = process_data.get("reactions", [])
+    if not reactions_data:
+        return {"success": True, "message": "No reactions defined — skipping.", "added": 0}
+
+    compounds = process_data.get("compounds", [])
+    unit_ops   = process_data.get("unit_operations", [])
+
+    _reactor_types = {
+        "ConversionReactor", "EquilibriumReactor", "GibbsReactor", "CSTR", "PFR",
+    }
+    reactors = [op for op in unit_ops if op["type"] in _reactor_types]
+
+    try:
+        # ── 1. Import DWSIM reaction classes ──────────────────────────────────
+        _Rxn = _RStoich = _RxnSet = None
+
+        for mod_path in [
+            ("DWSIM.Thermodynamics.Reactions", "Reaction"),
+            ("DWSIM.SharedClasses.Utility",    "Reaction"),
+            ("DWSIM.SharedClasses",            "Reaction"),
+        ]:
+            try:
+                import importlib
+                mod = importlib.import_module(mod_path[0])
+                _Rxn = getattr(mod, mod_path[1])
+                break
+            except Exception:
+                pass
+
+        if _Rxn is None:
+            # Last-resort: try direct CLR import
+            try:
+                from DWSIM.Thermodynamics.Reactions import Reaction as _Rxn  # type: ignore
+            except Exception:
+                pass
+
+        for mod_path in [
+            ("DWSIM.Thermodynamics.Reactions", "ReactionStoichimetry"),
+            ("DWSIM.SharedClasses.Utility",    "ReactionStoichimetry"),
+        ]:
+            try:
+                import importlib
+                mod = importlib.import_module(mod_path[0])
+                _RStoich = getattr(mod, mod_path[1])
+                break
+            except Exception:
+                pass
+
+        if _RStoich is None:
+            try:
+                from DWSIM.Thermodynamics.Reactions import ReactionStoichimetry as _RStoich  # type: ignore
+            except Exception:
+                pass
+
+        for mod_path in [
+            ("DWSIM.SharedClasses.Utility", "ReactionSet"),
+            ("DWSIM.SharedClasses",         "ReactionSet"),
+        ]:
+            try:
+                import importlib
+                mod = importlib.import_module(mod_path[0])
+                _RxnSet = getattr(mod, mod_path[1])
+                break
+            except Exception:
+                pass
+
+        if _RxnSet is None:
+            try:
+                from DWSIM.SharedClasses.Utility import ReactionSet as _RxnSet  # type: ignore
+            except Exception:
+                pass
+
+        if _Rxn is None or _RxnSet is None:
+            return {
+                "success": False,
+                "error": (
+                    "Could not import DWSIM reaction classes. "
+                    "Reactions not added — simulator may not converge."
+                ),
+            }
+
+        # ── 2. Build one ReactionSet for all reactions ────────────────────────
+        rxnset = _RxnSet()
+        rxnset_id = str(uuid.uuid4())
+        rxnset.ID   = rxnset_id
+        rxnset.Name = f"{process_data.get('chemical', 'Process')} Reactions"
+
+        added = []
+
+        for i, rxn_data in enumerate(reactions_data):
+            try:
+                rxn = _Rxn()
+                rxn_id   = str(uuid.uuid4())
+                rxn.ID   = rxn_id
+                rxn.Name = rxn_data.get("equation", f"Reaction {i+1}")
+
+                # ── Reaction type ───────────────────────────────────────────
+                rxn_type = rxn_data.get("type", "ConversionReactor")
+                if rxn_type == "ConversionReactor":
+                    try:
+                        from DWSIM.Thermodynamics.Reactions import ReactionType as _RT  # type: ignore
+                        rxn.ReactionType = _RT.Conversion
+                    except Exception:
+                        try:
+                            rxn.ReactionType = 0          # 0 = Conversion in DWSIM enum
+                        except Exception:
+                            pass
+
+                # ── Conversion spec ─────────────────────────────────────────
+                conversion = float(rxn_data.get("conversion", 0.05))
+                for attr in ("Spec", "XFix", "ConversionSpec", "X_Conversion"):
+                    try:
+                        setattr(rxn, attr, conversion)
+                    except Exception:
+                        pass
+
+                # ── Stoichiometry ────────────────────────────────────────────
+                # Parse "A + B → C + D" style equations
+                equation = rxn_data.get("equation", "")
+                reactant_str, product_str = "", ""
+                for sep in ["→", "->"]:
+                    if sep in equation:
+                        reactant_str, product_str = equation.split(sep, 1)
+                        break
+
+                base_set = False
+
+                def _add_stoich(term_str: str, sign: int) -> None:
+                    """Add stoichiometry for one side of the equation."""
+                    nonlocal base_set
+                    for term in term_str.split("+"):
+                        term = term.strip()
+                        for cname in compounds:
+                            if cname in term:
+                                try:
+                                    coeff_raw = term.replace(cname, "").strip()
+                                    coeff = float(coeff_raw) if coeff_raw else 1.0
+                                except ValueError:
+                                    coeff = 1.0
+
+                                if _RStoich is not None:
+                                    try:
+                                        rs = _RStoich()
+                                        rs.CompoundName   = cname
+                                        rs.StoichCoeff    = sign * coeff
+                                        rs.IsBaseReactant = (sign < 0 and not base_set)
+                                        if rs.IsBaseReactant:
+                                            rxn.BaseReactant = cname
+                                            base_set = True
+                                        rxn.Components.Add(cname, rs)
+                                    except Exception:
+                                        pass
+                                break  # found compound for this term
+
+                if reactant_str:
+                    _add_stoich(reactant_str, -1)
+                if product_str:
+                    _add_stoich(product_str, +1)
+
+                # ── Add reaction to flowsheet ────────────────────────────────
+                _sim.Reactions.Add(rxn_id, rxn)
+
+                # ── Add reaction ID to the reaction set ──────────────────────
+                try:
+                    rxnset.Reactions.Add(rxn_id, True)
+                except Exception:
+                    try:
+                        rxnset.Reactions[rxn_id] = True
+                    except Exception:
+                        pass
+
+                added.append({"id": rxn_id, "name": rxn.Name, "conversion": conversion})
+
+            except Exception as exc:
+                added.append({"error": str(exc), "rxn_index": i})
+
+        # ── 3. Add reaction set to flowsheet ──────────────────────────────────
+        _sim.ReactionSets.Add(rxnset_id, rxnset)
+
+        # ── 4. Assign reaction set to all reactors ────────────────────────────
+        assigned_to = []
+        for reactor_op in reactors:
+            tag = reactor_op["name"]
+            obj = _object_registry.get(tag)
+            if obj is not None:
+                try:
+                    obj.ReactionSetID = rxnset_id
+                    assigned_to.append(tag)
+                except Exception as exc:
+                    assigned_to.append(f"{tag} (assign failed: {exc})")
+
+        return {
+            "success": True,
+            "reaction_set_id": rxnset_id,
+            "reactions_added": added,
+            "assigned_to_reactors": assigned_to,
+        }
+
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+        }
+
+
 def build_process_from_library(process_data: dict, output_dir: str | None = None) -> dict:
     """
     High-level function: build and run a complete simulation from a
@@ -858,6 +1310,16 @@ def build_process_from_library(process_data: dict, output_dir: str | None = None
     # Step 6: wire up connections
     r = connect_all(process_data["connections"])
     steps.append({"step": "connect_objects", **r})
+
+    # Step 6b: create reaction sets and assign to reactors
+    r = setup_reactions(process_data)
+    steps.append({"step": "setup_reactions", **r})
+
+    # Step 6c: apply unit operation specs (outlet temps, reflux ratios, pressures…)
+    unit_op_specs = process_data.get("unit_op_specs", {})
+    if unit_op_specs:
+        r = configure_all_unit_ops(unit_op_specs)
+        steps.append({"step": "configure_unit_ops", **r})
 
     # Step 7: run simulation
     r = run_simulation()

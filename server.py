@@ -314,16 +314,19 @@ def generate_pfd(
     )] = None,
 ) -> dict:
     """
-    Generate a Process Flow Diagram for a chemical process.
+    Generate a Process Flow Diagram for a chemical process in multiple formats.
 
-    Returns:
-    - text_pfd: ASCII art PFD for terminal display
-    - dot_source: Graphviz DOT source for rendering
-    - dot_path: path to saved .dot file
-    - png_path: path to rendered PNG (if graphviz installed)
+    Always returns:
+    - text_pfd:    ASCII art PFD — show this in a code block in chat
+    - mermaid_pfd: Mermaid flowchart — paste in a ```mermaid block to render
+    - svg_pfd:     Full SVG source — save as .svg and open in any browser
+    - svg_path:    path to the saved .svg file
+    - dot_source:  Graphviz DOT source
+    - dot_path:    path to saved .dot file
+    - png_path:    path to rendered PNG (only if graphviz is installed)
 
-    The text PFD is always available. The graphviz PNG requires
-    the 'dot' command to be installed.
+    The SVG is the most portable download format: no dependencies, opens in
+    Chrome/Edge/Firefox and can be imported into Visio/PowerPoint/Word.
     """
     process_data = _lib.lookup_process(chemical)
     if not process_data.get("found"):
@@ -877,6 +880,96 @@ def build_process_from_library(
         os.path.dirname(os.path.abspath(__file__)), "outputs"
     )
     return _dwsim.build_process_from_library(process_data, default_output)
+
+
+@mcp.tool()
+def configure_unit_operation(
+    tag: Annotated[str, Field(
+        description=(
+            "Tag of the unit operation to configure (e.g. 'H-101', 'T-101', 'K-101'). "
+            "Must already exist in the active flowsheet."
+        )
+    )],
+    specs: Annotated[dict, Field(
+        description=(
+            "Dict of spec key → value. Works for ANY unit op in ANY flowsheet.\n"
+            "Heater/Cooler:    outlet_T_C, duty_kW, delta_P_bar\n"
+            "Compressor/Pump:  outlet_P_bar, efficiency\n"
+            "Valve:            outlet_P_bar\n"
+            "Flash/Vessel:     P_bar, T_C, vapor_frac\n"
+            "ShortcutColumn/DistillationColumn:\n"
+            "  light_key, heavy_key, light_key_recovery, heavy_key_recovery,\n"
+            "  reflux_ratio, num_stages, condenser_P_bar, reboiler_P_bar\n"
+            "Example for column: "
+            "{\"reflux_ratio\": 1.5, \"light_key\": \"Ethanol\", "
+            "\"heavy_key\": \"Water\", \"light_key_recovery\": 0.99, "
+            "\"heavy_key_recovery\": 0.01}"
+        )
+    )],
+) -> dict:
+    """
+    Set operating specs on any unit operation — library process or custom.
+
+    Use this whenever the user specifies operating parameters in their prompt:
+    e.g. 'use reflux ratio 2.0', 'set outlet temperature 350°C',
+    'condenser pressure 1.5 bar', 'compressor efficiency 80%'.
+
+    Returns tag, detected DWSIM type, list of properties applied, and any specs
+    that could not be matched (useful for debugging API property name mismatches).
+    """
+    return _dwsim.configure_unit_operation(tag, specs)
+
+
+@mcp.tool()
+def configure_multiple_unit_ops(
+    unit_op_specs: Annotated[dict, Field(
+        description=(
+            "Dict of {tag: {spec_key: value}} to configure in one call. "
+            "Example: {\"H-101\": {\"outlet_T_C\": 300}, "
+            "\"T-101\": {\"reflux_ratio\": 1.5, \"light_key\": \"Ethanol\", "
+            "\"heavy_key\": \"Water\", \"light_key_recovery\": 0.99, "
+            "\"heavy_key_recovery\": 0.01}}"
+        )
+    )],
+) -> dict:
+    """
+    Configure multiple unit operations at once.
+
+    Equivalent to calling configure_unit_operation for each tag.
+    Use this when the user specifies conditions for several pieces of equipment
+    in one prompt, or to apply a full set of operating specs before running
+    the simulation.
+    """
+    return _dwsim.configure_all_unit_ops(unit_op_specs)
+
+
+@mcp.tool()
+def setup_reactions(
+    chemical: Annotated[str, Field(
+        description=(
+            "Chemical name whose reaction definitions should be loaded. "
+            "Looks up the process library and creates DWSIM Reaction + ReactionSet objects, "
+            "then assigns them to the reactor unit ops in the active flowsheet."
+        )
+    )],
+) -> dict:
+    """
+    Create reaction sets for the active flowsheet from the process library.
+
+    Call this after create_flowsheet + add_unit_operation but BEFORE run_simulation.
+    Without a reaction set, ConversionReactor / EquilibriumReactor cannot converge
+    and their blocks stay red (unsolved) in DWSIM.
+
+    Returns success flag, reaction IDs created, and which reactors were assigned.
+    """
+    process_data = _lib.lookup_process(chemical)
+    if not process_data.get("found"):
+        return {
+            "success": False,
+            "error": f"Chemical '{chemical}' not in library.",
+            "available": _lib.list_available_processes(),
+        }
+    return _dwsim.setup_reactions(process_data)
 
 
 # ─────────────────────────────────────────────
