@@ -42,7 +42,7 @@ Usage:
 """
 
 from __future__ import annotations
-
+import sys
 import json
 import os
 from typing import Annotated
