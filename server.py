@@ -960,4 +960,25 @@ Conclude with which process you think is more complex from a CPD standpoint, and
 # ─────────────────────────────────────────────
 
 if __name__ == "__main__":
+    import io
+
+    # ── Protect the MCP JSON-RPC stream from .NET console output ──
+    #
+    # DWSIM loads .NET assemblies via pythonnet which may write diagnostic
+    # messages directly to file descriptor 1 (stdout) via Console.Out.
+    # The MCP stdio transport also uses stdout for JSON-RPC framing.
+    # If .NET writes even a single byte, the client sees corrupted JSON
+    # and raises "Unexpected token … is not valid JSON".
+    #
+    # Fix: move the real stdout pipe to a new file descriptor, redirect
+    # fd 1 to stderr (harmless sink), then point Python's sys.stdout at
+    # the saved descriptor so FastMCP's writes still reach the client.
+    _saved_fd = os.dup(1)          # duplicate the real stdout pipe
+    os.dup2(2, 1)                  # fd 1 now points to stderr
+    sys.stdout = io.TextIOWrapper(
+        os.fdopen(_saved_fd, "wb", buffering=0),
+        encoding="utf-8",
+        write_through=True,
+    )
+
     mcp.run()   # defaults to stdio transport (correct for Claude Desktop / Code)

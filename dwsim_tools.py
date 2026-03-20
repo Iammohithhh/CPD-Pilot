@@ -17,12 +17,39 @@ server degrades gracefully.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 import json
 import traceback
 from pathlib import Path
 from typing import Any
+
+
+@contextlib.contextmanager
+def _suppress_native_stdout():
+    """
+    Temporarily redirect OS-level file descriptor 1 (stdout) to devnull.
+
+    .NET code loaded by pythonnet may call Console.WriteLine which writes
+    directly to fd 1, bypassing Python's sys.stdout.  When running under
+    the MCP stdio transport this corrupts the JSON-RPC framing.
+
+    This context manager redirects fd 1 to /dev/null (or NUL on Windows)
+    for the duration of the block, then restores it.  Python's sys.stdout
+    is untouched and continues to work normally.
+    """
+    try:
+        _saved = os.dup(1)
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 1)
+        os.close(devnull)
+        yield
+    except Exception:
+        yield  # if dup fails, just run without redirect
+    else:
+        os.dup2(_saved, 1)
+        os.close(_saved)
 
 # ─────────────────────────────────────────────
 # 1. Locate DWSIM installation
@@ -98,8 +125,11 @@ def _load_dwsim() -> bool:
     try:
         # Windows COM initialisation
         if sys.platform == "win32":
-            import pythoncom  # type: ignore
-            pythoncom.CoInitialize()
+            try:
+                import pythoncom  # type: ignore
+                pythoncom.CoInitialize()
+            except ImportError:
+                pass
 
         # Add DWSIM_PATH to OS PATH so Windows finds native DLLs
         # (libSkiaSharp, CoolProp, etc.) during P/Invoke calls.
@@ -145,6 +175,8 @@ def _load_dwsim() -> bool:
         except Exception:
             pass  # older pythonnet auto-loads, or runtime already initialised
 
+        # Suppress .NET console output during assembly loading to avoid
+        # corrupting the MCP JSON-RPC stream on stdout.
         import clr  # type: ignore
         import System  # type: ignore  (always available with coreclr)
 
@@ -169,34 +201,35 @@ def _load_dwsim() -> bool:
 
         System.AppDomain.CurrentDomain.AssemblyResolve += _resolve_dwsim_assembly
 
-        required_dlls = [
-            "CapeOpen.dll",
-            "DWSIM.Automation.dll",
-            "DWSIM.Interfaces.dll",
-            "DWSIM.GlobalSettings.dll",
-            "DWSIM.SharedClasses.dll",
-            "DWSIM.Thermodynamics.dll",
-            "DWSIM.UnitOperations.dll",
-            "DWSIM.Inspector.dll",
-            "DWSIM.MathOps.dll",
-        ]
-        for dll in required_dlls:
-            full_path = os.path.join(DWSIM_PATH, dll)
-            if os.path.isfile(full_path):
-                clr.AddReference(full_path)
+        with _suppress_native_stdout():
+            required_dlls = [
+                "CapeOpen.dll",
+                "DWSIM.Automation.dll",
+                "DWSIM.Interfaces.dll",
+                "DWSIM.GlobalSettings.dll",
+                "DWSIM.SharedClasses.dll",
+                "DWSIM.Thermodynamics.dll",
+                "DWSIM.UnitOperations.dll",
+                "DWSIM.Inspector.dll",
+                "DWSIM.MathOps.dll",
+            ]
+            for dll in required_dlls:
+                full_path = os.path.join(DWSIM_PATH, dll)
+                if os.path.isfile(full_path):
+                    clr.AddReference(full_path)
 
-        # Import DWSIM namespaces via the CLR import hook
-        from DWSIM.Automation import Automation3 as _A3  # type: ignore
-        from DWSIM.Interfaces.Enums.GraphicObjects import ObjectType as _OT  # type: ignore
-        from DWSIM.Thermodynamics import PropertyPackages as _PP  # type: ignore
-        from DWSIM.UnitOperations import UnitOperations as _UO  # type: ignore
-        from DWSIM.GlobalSettings import Settings as _S  # type: ignore
+            # Import DWSIM namespaces via the CLR import hook
+            from DWSIM.Automation import Automation3 as _A3  # type: ignore
+            from DWSIM.Interfaces.Enums.GraphicObjects import ObjectType as _OT  # type: ignore
+            from DWSIM.Thermodynamics import PropertyPackages as _PP  # type: ignore
+            from DWSIM.UnitOperations import UnitOperations as _UO  # type: ignore
+            from DWSIM.GlobalSettings import Settings as _S  # type: ignore
 
-        Automation3 = _A3
-        ObjectType = _OT
-        PropertyPackages = _PP
-        UnitOperations = _UO
-        Settings = _S
+            Automation3 = _A3
+            ObjectType = _OT
+            PropertyPackages = _PP
+            UnitOperations = _UO
+            Settings = _S
 
         _dwsim_loaded = True
         return True
@@ -321,28 +354,29 @@ def create_flowsheet(compounds: list[str], thermo_model: str) -> dict:
             return r
 
     try:
-        _sim = _interf.CreateFlowsheet()
-        _object_registry = {}
+        with _suppress_native_stdout():
+            _sim = _interf.CreateFlowsheet()
+            _object_registry = {}
 
-        # Add compounds
-        added = []
-        missing = []
-        for cname in compounds:
-            try:
-                _sim.AddCompound(cname)
-                added.append(cname)
-            except Exception:
-                # Try AvailableCompounds dict
+            # Add compounds
+            added = []
+            missing = []
+            for cname in compounds:
                 try:
-                    comp = _sim.AvailableCompounds[cname]
-                    _sim.SelectedCompounds.Add(comp.Name, comp)
+                    _sim.AddCompound(cname)
                     added.append(cname)
                 except Exception:
-                    missing.append(cname)
+                    # Try AvailableCompounds dict
+                    try:
+                        comp = _sim.AvailableCompounds[cname]
+                        _sim.SelectedCompounds.Add(comp.Name, comp)
+                        added.append(cname)
+                    except Exception:
+                        missing.append(cname)
 
-        # Add property package
-        pp = _make_property_package(thermo_model)
-        _sim.AddPropertyPackage(pp)
+            # Add property package
+            pp = _make_property_package(thermo_model)
+            _sim.AddPropertyPackage(pp)
 
         return {
             "success": True,
@@ -374,8 +408,9 @@ def add_unit_operation(op_type: str, tag: str, x: int = 100, y: int = 100) -> di
 
     try:
         ot = _obj_type(op_type)
-        obj_wrapper = _sim.AddObject(ot, x, y, tag)
-        obj = obj_wrapper.GetAsObject()
+        with _suppress_native_stdout():
+            obj_wrapper = _sim.AddObject(ot, x, y, tag)
+            obj = obj_wrapper.GetAsObject()
         _object_registry[tag] = obj
         return {"success": True, "tag": tag, "type": op_type}
     except Exception as exc:
@@ -469,9 +504,26 @@ def set_stream_conditions(
         return {"success": False, "tag": tag, "error": str(exc)}
 
 
+def _is_stream(tag: str) -> bool:
+    """Check whether a registered object is a Material or Energy stream."""
+    obj = _object_registry.get(tag)
+    if obj is None:
+        return False
+    try:
+        type_name = obj.GraphicObject.ObjectType.ToString()
+        return type_name in ("MaterialStream", "EnergyStream")
+    except Exception:
+        # Fallback: stream tags often start with "S-"
+        return tag.startswith("S-")
+
+
 def connect_objects(from_tag: str, to_tag: str) -> dict:
     """
-    Connect two objects in the flowsheet (auto port selection).
+    Connect two objects in the flowsheet.
+
+    DWSIM requires MaterialStream objects between unit operations.
+    If both from_tag and to_tag are unit operations (not streams),
+    an intermediate MaterialStream is created automatically.
     """
     if _sim is None:
         return {"success": False, "error": "No flowsheet active."}
@@ -484,8 +536,56 @@ def connect_objects(from_tag: str, to_tag: str) -> dict:
     try:
         from_obj = _object_registry[from_tag]
         to_obj = _object_registry[to_tag]
-        _sim.ConnectObjects(from_obj.GraphicObject, to_obj.GraphicObject, -1, -1)
-        return {"success": True, "from": from_tag, "to": to_tag}
+
+        from_is_stream = _is_stream(from_tag)
+        to_is_stream = _is_stream(to_tag)
+
+        if from_is_stream or to_is_stream:
+            # At least one side is a stream — direct connection is fine
+            _sim.ConnectObjects(
+                from_obj.GraphicObject, to_obj.GraphicObject, -1, -1
+            )
+            return {"success": True, "from": from_tag, "to": to_tag}
+        else:
+            # Both sides are unit operations — create an intermediate stream
+            _auto_stream_counter = getattr(connect_objects, "_counter", 0) + 1
+            connect_objects._counter = _auto_stream_counter
+            mid_tag = f"_S-{from_tag}-{to_tag}"
+
+            # Compute canvas position as midpoint between the two units
+            try:
+                fx = from_obj.GraphicObject.X
+                fy = from_obj.GraphicObject.Y
+                tx = to_obj.GraphicObject.X
+                ty = to_obj.GraphicObject.Y
+                mx, my = int((fx + tx) / 2), int((fy + ty) / 2)
+            except Exception:
+                mx, my = 200, 200
+
+            r = add_unit_operation("MaterialStream", mid_tag, mx, my)
+            if not r.get("success"):
+                return {
+                    "success": False,
+                    "from": from_tag,
+                    "to": to_tag,
+                    "error": f"Could not create intermediate stream '{mid_tag}': {r.get('error')}",
+                }
+
+            mid_obj = _object_registry[mid_tag]
+
+            # Connect: source unit → intermediate stream → destination unit
+            _sim.ConnectObjects(
+                from_obj.GraphicObject, mid_obj.GraphicObject, -1, -1
+            )
+            _sim.ConnectObjects(
+                mid_obj.GraphicObject, to_obj.GraphicObject, -1, -1
+            )
+            return {
+                "success": True,
+                "from": from_tag,
+                "to": to_tag,
+                "intermediate_stream": mid_tag,
+            }
     except Exception as exc:
         return {"success": False, "from": from_tag, "to": to_tag, "error": str(exc)}
 
@@ -520,18 +620,19 @@ def run_simulation(timeout_seconds: int = 120) -> dict:
         return {"success": False, "error": "DWSIM interface not initialised."}
 
     try:
-        # Auto-layout for cleaner flowsheet
-        _sim.AutoLayout()
+        with _suppress_native_stdout():
+            # Auto-layout for cleaner flowsheet
+            _sim.AutoLayout()
 
-        Settings.SolverMode = 0  # synchronous
+            Settings.SolverMode = 0  # synchronous
 
-        if timeout_seconds and timeout_seconds > 0:
-            try:
-                _interf.CalculateFlowsheet3(_sim, timeout_seconds)
-            except Exception:
-                pass  # fall through to CalculateFlowsheet4
+            if timeout_seconds and timeout_seconds > 0:
+                try:
+                    _interf.CalculateFlowsheet3(_sim, timeout_seconds)
+                except Exception:
+                    pass  # fall through to CalculateFlowsheet4
 
-        errors = _interf.CalculateFlowsheet4(_sim)
+            errors = _interf.CalculateFlowsheet4(_sim)
 
         error_list = []
         if errors is not None:
@@ -665,7 +766,8 @@ def save_flowsheet(file_path: str, compressed: bool = True) -> dict:
         dir_part = os.path.dirname(file_path)
         if dir_part:
             os.makedirs(dir_part, exist_ok=True)
-        _interf.SaveFlowsheet(_sim, file_path, compressed)
+        with _suppress_native_stdout():
+            _interf.SaveFlowsheet(_sim, file_path, compressed)
         return {"success": True, "saved_to": file_path}
     except Exception as exc:
         return {"success": False, "error": str(exc)}
