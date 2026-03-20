@@ -883,6 +883,67 @@ def build_process_from_library(
 
 
 @mcp.tool()
+def configure_unit_operation(
+    tag: Annotated[str, Field(
+        description=(
+            "Tag of the unit operation to configure (e.g. 'H-101', 'T-101', 'K-101'). "
+            "Must already exist in the active flowsheet."
+        )
+    )],
+    specs: Annotated[dict, Field(
+        description=(
+            "Dict of spec key → value. Works for ANY unit op in ANY flowsheet.\n"
+            "Heater/Cooler:    outlet_T_C, duty_kW, delta_P_bar\n"
+            "Compressor/Pump:  outlet_P_bar, efficiency\n"
+            "Valve:            outlet_P_bar\n"
+            "Flash/Vessel:     P_bar, T_C, vapor_frac\n"
+            "ShortcutColumn/DistillationColumn:\n"
+            "  light_key, heavy_key, light_key_recovery, heavy_key_recovery,\n"
+            "  reflux_ratio, num_stages, condenser_P_bar, reboiler_P_bar\n"
+            "Example for column: "
+            "{\"reflux_ratio\": 1.5, \"light_key\": \"Ethanol\", "
+            "\"heavy_key\": \"Water\", \"light_key_recovery\": 0.99, "
+            "\"heavy_key_recovery\": 0.01}"
+        )
+    )],
+) -> dict:
+    """
+    Set operating specs on any unit operation — library process or custom.
+
+    Use this whenever the user specifies operating parameters in their prompt:
+    e.g. 'use reflux ratio 2.0', 'set outlet temperature 350°C',
+    'condenser pressure 1.5 bar', 'compressor efficiency 80%'.
+
+    Returns tag, detected DWSIM type, list of properties applied, and any specs
+    that could not be matched (useful for debugging API property name mismatches).
+    """
+    return _dwsim.configure_unit_operation(tag, specs)
+
+
+@mcp.tool()
+def configure_multiple_unit_ops(
+    unit_op_specs: Annotated[dict, Field(
+        description=(
+            "Dict of {tag: {spec_key: value}} to configure in one call. "
+            "Example: {\"H-101\": {\"outlet_T_C\": 300}, "
+            "\"T-101\": {\"reflux_ratio\": 1.5, \"light_key\": \"Ethanol\", "
+            "\"heavy_key\": \"Water\", \"light_key_recovery\": 0.99, "
+            "\"heavy_key_recovery\": 0.01}}"
+        )
+    )],
+) -> dict:
+    """
+    Configure multiple unit operations at once.
+
+    Equivalent to calling configure_unit_operation for each tag.
+    Use this when the user specifies conditions for several pieces of equipment
+    in one prompt, or to apply a full set of operating specs before running
+    the simulation.
+    """
+    return _dwsim.configure_all_unit_ops(unit_op_specs)
+
+
+@mcp.tool()
 def setup_reactions(
     chemical: Annotated[str, Field(
         description=(

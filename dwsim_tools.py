@@ -791,6 +791,230 @@ def load_flowsheet(file_path: str) -> dict:
         return {"success": False, "error": str(exc)}
 
 
+def configure_unit_operation(tag: str, specs: dict) -> dict:
+    """
+    Set operating specs on any unit operation in the active flowsheet.
+
+    Works for ANY process — library or custom.  Just pass the tag and a flat
+    dict of spec keys.  Unknown keys are silently skipped; multiple fallback
+    property names are tried for each spec so it stays robust across DWSIM
+    versions.
+
+    Supported spec keys
+    ───────────────────
+    Heater / Cooler
+        outlet_T_C   float  Outlet temperature in °C
+        outlet_T_K   float  Outlet temperature in K
+        duty_kW      float  Heat duty in kW (positive = add heat)
+        delta_P_bar  float  Pressure drop across unit in bar
+
+    Compressor / Pump / Expander
+        outlet_P_bar float  Outlet pressure in bar
+        outlet_P_Pa  float  Outlet pressure in Pa
+        efficiency   float  Isentropic efficiency 0–1
+
+    Flash / Vessel / Separator
+        P_bar        float  Flash pressure in bar
+        T_C          float  Flash temperature in °C (PT flash)
+        vapor_frac   float  Vapour fraction 0–1 (PV flash, use instead of T_C)
+
+    Valve
+        outlet_P_bar float  Outlet pressure in bar
+
+    ShortcutColumn / DistillationColumn / AbsorptionColumn
+        light_key            str    Light-key compound name
+        heavy_key            str    Heavy-key compound name
+        light_key_recovery   float  Mole-fraction recovery of light key in distillate
+        heavy_key_recovery   float  Mole-fraction recovery of heavy key in bottoms
+        reflux_ratio         float  Operating reflux ratio (must be > min reflux)
+        num_stages           int    Number of theoretical stages
+        condenser_P_bar      float  Condenser pressure in bar
+        reboiler_P_bar       float  Reboiler pressure in bar
+        condenser_type       int    0 = total condenser (default), 1 = partial
+
+    Args:
+        tag:   Tag of the unit operation in the active flowsheet.
+        specs: Dict of spec key → value (see above).
+
+    Returns dict with success flag, tag, and list of properties applied/failed.
+    """
+    if _sim is None:
+        return {"success": False, "error": "No flowsheet active."}
+    if tag not in _object_registry:
+        return {"success": False, "error": f"Tag '{tag}' not found in flowsheet."}
+
+    obj = _object_registry[tag]
+    applied: list[str] = []
+    skipped: list[str] = []
+
+    def _try_set(attr_names, value, label: str) -> bool:
+        """Try setting `value` on the first matching attribute in attr_names."""
+        for a in attr_names:
+            try:
+                setattr(obj, a, value)
+                applied.append(f"{label} → {a}={value}")
+                return True
+            except Exception:
+                pass
+        skipped.append(f"{label}: none of {attr_names} accepted value {value}")
+        return False
+
+    # ── Detect object type ────────────────────────────────────────────────────
+    obj_type = ""
+    try:
+        obj_type = obj.GraphicObject.ObjectType.ToString()
+    except Exception:
+        try:
+            obj_type = type(obj).__name__
+        except Exception:
+            pass
+
+    # ── Heater / Cooler ───────────────────────────────────────────────────────
+    if obj_type in ("Heater", "Cooler") or "eater" in obj_type or "ooler" in obj_type:
+        if "outlet_T_C" in specs or "outlet_T_K" in specs:
+            T_K = (specs["outlet_T_K"] if "outlet_T_K" in specs
+                   else specs["outlet_T_C"] + 273.15)
+            # CalcMode 0 = specify outlet temperature
+            _try_set(["CalcMode"], 0, "CalcMode=OutletTemp")
+            _try_set(
+                ["DefinedTemperature", "OutletTemperature", "Tout", "Temperature"],
+                T_K, "outlet_T_K",
+            )
+        if "duty_kW" in specs:
+            _try_set(["CalcMode"], 1, "CalcMode=Duty")
+            _try_set(["DeltaQ", "HeatDuty", "Duty"], specs["duty_kW"] * 1000, "duty_W")
+        if "delta_P_bar" in specs:
+            _try_set(["DeltaP", "PressureDrop"], specs["delta_P_bar"] * 1e5, "delta_P_Pa")
+
+    # ── Compressor / Pump / Expander ──────────────────────────────────────────
+    elif obj_type in ("Compressor", "Pump", "Expander") or any(
+        k in obj_type for k in ("ompressor", "ump", "xpander")
+    ):
+        if "outlet_P_bar" in specs or "outlet_P_Pa" in specs:
+            P_Pa = (specs["outlet_P_Pa"] if "outlet_P_Pa" in specs
+                    else specs["outlet_P_bar"] * 1e5)
+            _try_set(["CalcMode"], 0, "CalcMode=OutletPressure")
+            _try_set(["POut", "OutletPressure", "Pout"], P_Pa, "outlet_P_Pa")
+        if "efficiency" in specs:
+            eff = specs["efficiency"]
+            _try_set(
+                ["AdiabaticEfficiency", "Eficiencia",
+                 "IsentropicEfficiency", "Efficiency"],
+                eff, "efficiency",
+            )
+
+    # ── Valve ─────────────────────────────────────────────────────────────────
+    elif obj_type == "Valve" or "alve" in obj_type:
+        if "outlet_P_bar" in specs or "outlet_P_Pa" in specs:
+            P_Pa = (specs["outlet_P_Pa"] if "outlet_P_Pa" in specs
+                    else specs["outlet_P_bar"] * 1e5)
+            _try_set(["POut", "OutletPressure", "Pout"], P_Pa, "outlet_P_Pa")
+
+    # ── Flash / Vessel / Separator ────────────────────────────────────────────
+    elif obj_type in ("Vessel", "Tank", "Flash") or any(
+        k in obj_type for k in ("essel", "lash", "eparator")
+    ):
+        if "P_bar" in specs:
+            P_Pa = specs["P_bar"] * 1e5
+            _try_set(["FlashPressure", "Pressure", "OperatingPressure"], P_Pa, "P_Pa")
+        if "T_C" in specs:
+            T_K = specs["T_C"] + 273.15
+            # PT flash
+            _try_set(["FlashType", "CalculationMode"], 1, "FlashType=PT")
+            _try_set(["FlashTemperature", "Temperature", "OperatingTemperature"],
+                     T_K, "T_K")
+        elif "vapor_frac" in specs:
+            # PV flash
+            _try_set(["FlashType", "CalculationMode"], 0, "FlashType=PV")
+            _try_set(["VaporFraction", "VF"], specs["vapor_frac"], "vapor_frac")
+
+    # ── ShortcutColumn / DistillationColumn / AbsorptionColumn ───────────────
+    elif any(k in obj_type for k in ("Column", "hortcut", "istillation", "bsorption")):
+        if "light_key" in specs:
+            _try_set(
+                ["LightKeyCompound", "LightKey", "ReferenceComponent"],
+                specs["light_key"], "light_key",
+            )
+        if "heavy_key" in specs:
+            _try_set(
+                ["HeavyKeyCompound", "HeavyKey"],
+                specs["heavy_key"], "heavy_key",
+            )
+        if "light_key_recovery" in specs:
+            _try_set(
+                ["LightKeyMoleFractionSpec", "LightKeyRecovery",
+                 "ReferenceComponentRecovery", "LKRecovery"],
+                specs["light_key_recovery"], "light_key_recovery",
+            )
+        if "heavy_key_recovery" in specs:
+            _try_set(
+                ["HeavyKeyMoleFractionSpec", "HeavyKeyRecovery", "HKRecovery"],
+                specs["heavy_key_recovery"], "heavy_key_recovery",
+            )
+        if "reflux_ratio" in specs:
+            _try_set(
+                ["RefluxRatio", "ActualRefluxRatio", "RR"],
+                specs["reflux_ratio"], "reflux_ratio",
+            )
+        if "num_stages" in specs:
+            _try_set(
+                ["NumberOfStages", "NumberOfTheoreticalStages", "N"],
+                int(specs["num_stages"]), "num_stages",
+            )
+        if "condenser_type" in specs:
+            _try_set(["CondenserType"], int(specs["condenser_type"]), "condenser_type")
+        if "condenser_P_bar" in specs:
+            P_Pa = specs["condenser_P_bar"] * 1e5
+            _try_set(
+                ["CondenserPressure", "Pcondens", "Pcond"],
+                P_Pa, "condenser_P_Pa",
+            )
+        if "reboiler_P_bar" in specs:
+            P_Pa = specs["reboiler_P_bar"] * 1e5
+            _try_set(
+                ["ReboilerPressure", "Preboiler", "Preb"],
+                P_Pa, "reboiler_P_Pa",
+            )
+
+    else:
+        # Unknown type — try to apply any numeric specs by common attr names
+        for key, val in specs.items():
+            skipped.append(f"{key}: unrecognised unit op type '{obj_type}'")
+
+    return {
+        "success": True,
+        "tag": tag,
+        "unit_op_type": obj_type,
+        "applied": applied,
+        "skipped": skipped,
+    }
+
+
+def configure_all_unit_ops(unit_op_specs: dict) -> dict:
+    """
+    Apply a full specs dict {tag: {spec_key: value, ...}} to the active flowsheet.
+
+    Calls configure_unit_operation() for every tag in unit_op_specs.
+    Used by build_process_from_library and can also be called directly.
+
+    Args:
+        unit_op_specs: e.g. {"H-101": {"outlet_T_C": 300}, "T-101": {...}}
+
+    Returns summary dict.
+    """
+    results = {}
+    for tag, specs in unit_op_specs.items():
+        results[tag] = configure_unit_operation(tag, specs)
+
+    success_count = sum(1 for r in results.values() if r.get("success"))
+    return {
+        "success": success_count == len(results),
+        "configured": success_count,
+        "failed": len(results) - success_count,
+        "details": results,
+    }
+
+
 def setup_reactions(process_data: dict) -> dict:
     """
     Create DWSIM reaction objects from process_library reaction specs and assign
@@ -1090,6 +1314,12 @@ def build_process_from_library(process_data: dict, output_dir: str | None = None
     # Step 6b: create reaction sets and assign to reactors
     r = setup_reactions(process_data)
     steps.append({"step": "setup_reactions", **r})
+
+    # Step 6c: apply unit operation specs (outlet temps, reflux ratios, pressures…)
+    unit_op_specs = process_data.get("unit_op_specs", {})
+    if unit_op_specs:
+        r = configure_all_unit_ops(unit_op_specs)
+        steps.append({"step": "configure_unit_ops", **r})
 
     # Step 7: run simulation
     r = run_simulation()
