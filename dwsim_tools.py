@@ -542,13 +542,16 @@ def connect_objects(from_tag: str, to_tag: str) -> dict:
         to_is_stream = _is_stream(to_tag)
 
         if from_is_stream or to_is_stream:
-            # At least one side is a stream — direct connection is fine
-            _sim.ConnectObjects(
-                from_obj.GraphicObject, to_obj.GraphicObject, -1, -1
-            )
+            # At least one side is a stream — direct connection is fine.
+            # ConnectObjects is a method on _interf (Automation3), NOT on _sim.
+            with _suppress_native_stdout():
+                _interf.ConnectObjects(
+                    _sim,
+                    from_obj.GraphicObject, to_obj.GraphicObject, -1, -1
+                )
             return {"success": True, "from": from_tag, "to": to_tag}
         else:
-            # Both sides are unit operations — create an intermediate stream
+            # Both sides are unit operations — create an intermediate stream.
             _auto_stream_counter = getattr(connect_objects, "_counter", 0) + 1
             connect_objects._counter = _auto_stream_counter
             mid_tag = f"_S-{from_tag}-{to_tag}"
@@ -575,12 +578,16 @@ def connect_objects(from_tag: str, to_tag: str) -> dict:
             mid_obj = _object_registry[mid_tag]
 
             # Connect: source unit → intermediate stream → destination unit
-            _sim.ConnectObjects(
-                from_obj.GraphicObject, mid_obj.GraphicObject, -1, -1
-            )
-            _sim.ConnectObjects(
-                mid_obj.GraphicObject, to_obj.GraphicObject, -1, -1
-            )
+            # Both calls must go through _interf.ConnectObjects(_sim, ...).
+            with _suppress_native_stdout():
+                _interf.ConnectObjects(
+                    _sim,
+                    from_obj.GraphicObject, mid_obj.GraphicObject, -1, -1
+                )
+                _interf.ConnectObjects(
+                    _sim,
+                    mid_obj.GraphicObject, to_obj.GraphicObject, -1, -1
+                )
             return {
                 "success": True,
                 "from": from_tag,
@@ -837,10 +844,12 @@ def add_energy_stream_to_unit_op(unit_op_tag: str, energy_tag: str | None = None
 
     # Try explicit energy-port index (usually 2 for heater/cooler, varies by version)
     # then fall back to DWSIM auto-detect (-1).
+    # ConnectObjects belongs to _interf (Automation3), not _sim (IFlowsheet).
     for src_port, dst_port in [(0, 2), (0, -1), (-1, -1)]:
         try:
             with _suppress_native_stdout():
-                _sim.ConnectObjects(
+                _interf.ConnectObjects(
+                    _sim,
                     e_obj.GraphicObject, unit_obj.GraphicObject,
                     src_port, dst_port,
                 )
