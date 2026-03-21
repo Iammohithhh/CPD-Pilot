@@ -791,6 +791,79 @@ def load_flowsheet(file_path: str) -> dict:
         return {"success": False, "error": str(exc)}
 
 
+def add_energy_stream_to_unit_op(unit_op_tag: str, energy_tag: str | None = None) -> dict:
+    """
+    Create an EnergyStream and connect it to the energy port of a unit operation.
+
+    When to use
+    ───────────
+    You only need this when the unit op is in energy-stream mode:
+    - Heater/Cooler with CalcMode = EnergyStream (mode 2): an external
+      utility stream (steam, CW) drives the duty.
+    - ConversionReactor in heat-balance mode (CalcMode 0): the heat of
+      reaction is exported via an energy stream.
+
+    For the common case (CalcMode 0/1 = specify outlet temperature), energy
+    streams are NOT required and you should call configure_unit_operation
+    with outlet_T_C instead — that is both simpler and more reliable.
+
+    Args:
+        unit_op_tag: Tag of the unit op to attach the energy stream to.
+        energy_tag:  Tag for the new EnergyStream; defaults to "ES-<unit_op_tag>".
+
+    Returns dict with success, energy stream tag, and connection details.
+    """
+    if _sim is None:
+        return {"success": False, "error": "No flowsheet active."}
+    if unit_op_tag not in _object_registry:
+        return {"success": False, "error": f"Unit op '{unit_op_tag}' not found."}
+
+    if energy_tag is None:
+        energy_tag = f"ES-{unit_op_tag}"
+
+    # Place the energy stream near the unit op on the canvas
+    unit_obj = _object_registry[unit_op_tag]
+    try:
+        ex = int(unit_obj.GraphicObject.X) + 60
+        ey = int(unit_obj.GraphicObject.Y) - 60
+    except Exception:
+        ex, ey = 300, 100
+
+    r = add_unit_operation("EnergyStream", energy_tag, ex, ey)
+    if not r.get("success"):
+        return r
+
+    e_obj = _object_registry[energy_tag]
+
+    # Try explicit energy-port index (usually 2 for heater/cooler, varies by version)
+    # then fall back to DWSIM auto-detect (-1).
+    for src_port, dst_port in [(0, 2), (0, -1), (-1, -1)]:
+        try:
+            with _suppress_native_stdout():
+                _sim.ConnectObjects(
+                    e_obj.GraphicObject, unit_obj.GraphicObject,
+                    src_port, dst_port,
+                )
+            return {
+                "success": True,
+                "energy_stream": energy_tag,
+                "connected_to": unit_op_tag,
+                "port_used": f"{src_port}→{dst_port}",
+            }
+        except Exception:
+            pass
+
+    return {
+        "success": False,
+        "energy_stream": energy_tag,
+        "error": (
+            f"EnergyStream '{energy_tag}' was created but could not be connected "
+            f"to the energy port of '{unit_op_tag}'. "
+            "Use configure_unit_operation with outlet_T_C to avoid needing an energy stream."
+        ),
+    }
+
+
 def configure_unit_operation(tag: str, specs: dict) -> dict:
     """
     Set operating specs on any unit operation in the active flowsheet.
@@ -976,9 +1049,59 @@ def configure_unit_operation(tag: str, specs: dict) -> dict:
                 P_Pa, "reboiler_P_Pa",
             )
 
+    # ── ConversionReactor / EquilibriumReactor / CSTR / PFR ─────────────────
+    #
+    # KEY FIX: DWSIM reactors default to heat-balance mode (CalcMode 0), which
+    # requires an energy stream to be connected.  Setting CalcMode = 1 switches
+    # to "specify outlet temperature" (isothermal) mode, which removes the
+    # energy-stream requirement entirely.  Always do this when outlet_T_C is
+    # provided; it is the correct engineering assumption for most assignments.
+    elif any(k in obj_type for k in (
+        "RCT_Conversion", "RCT_Equilibrium", "RCT_Gibbs", "RCT_CSTR", "RCT_PFR",
+        "Reactor", "CSTR", "PFR",
+    )):
+        if "outlet_T_C" in specs or "outlet_T_K" in specs:
+            T_K = (specs["outlet_T_K"] if "outlet_T_K" in specs
+                   else specs["outlet_T_C"] + 273.15)
+            # CalcMode 1 = isothermal (specify outlet temperature)
+            # This removes the energy-stream connection requirement.
+            _try_set(
+                ["CalcMode", "ReactorCalcMode", "OperationMode", "OutletTempMode"],
+                1, "CalcMode=Isothermal",
+            )
+            _try_set(
+                ["OutletTemperature", "ReactionTemperature",
+                 "IsothermalTemperature", "DefinedTemperature", "Temperature"],
+                T_K, "outlet_T_K",
+            )
+        if "outlet_P_bar" in specs:
+            P_Pa = specs["outlet_P_bar"] * 1e5
+            _try_set(
+                ["OutletPressure", "POut", "ReactionPressure"],
+                P_Pa, "outlet_P_Pa",
+            )
+
+    # ── Splitter (NodeOut) ────────────────────────────────────────────────────
+    elif obj_type in ("NodeOut", "Splitter") or "plitter" in obj_type:
+        if "split_fraction" in specs:
+            # split_fraction = fraction that leaves through the FIRST outlet.
+            # Second outlet gets 1 - split_fraction.
+            frac = float(specs["split_fraction"])
+            _try_set(
+                ["SplitRatios"],
+                [frac, 1.0 - frac], "split_fractions",
+            )
+            # Some DWSIM versions use indexed StreamRatio properties
+            for idx, val in enumerate([frac, 1.0 - frac]):
+                _try_set(
+                    [f"StreamRatio({idx})", f"StreamRatios[{idx}]",
+                     f"SplitRatio_{idx}"],
+                    val, f"stream_ratio_{idx}",
+                )
+
     else:
-        # Unknown type — try to apply any numeric specs by common attr names
-        for key, val in specs.items():
+        # Unknown type — record as skipped
+        for key in specs:
             skipped.append(f"{key}: unrecognised unit op type '{obj_type}'")
 
     return {

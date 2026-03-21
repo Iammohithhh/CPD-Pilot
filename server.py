@@ -883,6 +883,39 @@ def build_process_from_library(
 
 
 @mcp.tool()
+def add_energy_stream_to_unit_op(
+    unit_op_tag: Annotated[str, Field(
+        description=(
+            "Tag of the unit operation that needs an energy stream connected "
+            "(e.g. 'H-04', 'R-05'). Must already exist in the active flowsheet."
+        )
+    )],
+    energy_tag: Annotated[str | None, Field(
+        description=(
+            "Optional tag for the new EnergyStream. Defaults to 'ES-<unit_op_tag>'. "
+            "Example: 'ES-H-04', 'STEAM-01', 'CW-06'."
+        )
+    )] = None,
+) -> dict:
+    """
+    Create an EnergyStream and connect it to the energy port of a unit operation.
+
+    IMPORTANT — when to use this vs configure_unit_operation:
+    - If the user says 'set outlet temperature to X' → use configure_unit_operation
+      with outlet_T_C.  That sets the unit op to isothermal mode, which does NOT
+      require an energy stream.
+    - Only call this tool when the user specifically wants to model a utility
+      connection (e.g. 'connect a steam stream to HEX 01') or when DWSIM
+      reports 'energy stream required' after you have already tried isothermal mode.
+
+    The energy stream is placed on the canvas near the unit op and connected to
+    its energy port.  DWSIM tries port index 2 first (standard energy port for
+    heaters/reactors), then falls back to auto-detect.
+    """
+    return _dwsim.add_energy_stream_to_unit_op(unit_op_tag, energy_tag)
+
+
+@mcp.tool()
 def configure_unit_operation(
     tag: Annotated[str, Field(
         description=(
@@ -893,29 +926,33 @@ def configure_unit_operation(
     specs: Annotated[dict, Field(
         description=(
             "Dict of spec key → value. Works for ANY unit op in ANY flowsheet.\n"
-            "Heater/Cooler:    outlet_T_C, duty_kW, delta_P_bar\n"
-            "Compressor/Pump:  outlet_P_bar, efficiency\n"
-            "Valve:            outlet_P_bar\n"
-            "Flash/Vessel:     P_bar, T_C, vapor_frac\n"
+            "Heater/Cooler:      outlet_T_C, duty_kW, delta_P_bar\n"
+            "Compressor/Pump:    outlet_P_bar, efficiency\n"
+            "Valve:              outlet_P_bar\n"
+            "Flash/Vessel:       P_bar, T_C, vapor_frac\n"
+            "ConversionReactor:  outlet_T_C  ← sets isothermal mode (no energy stream needed!)\n"
+            "Splitter:           split_fraction  (fraction to first outlet; second = 1-f)\n"
             "ShortcutColumn/DistillationColumn:\n"
             "  light_key, heavy_key, light_key_recovery, heavy_key_recovery,\n"
-            "  reflux_ratio, num_stages, condenser_P_bar, reboiler_P_bar\n"
-            "Example for column: "
-            "{\"reflux_ratio\": 1.5, \"light_key\": \"Ethanol\", "
-            "\"heavy_key\": \"Water\", \"light_key_recovery\": 0.99, "
-            "\"heavy_key_recovery\": 0.01}"
+            "  reflux_ratio, num_stages, condenser_P_bar, reboiler_P_bar, condenser_type\n"
+            "Example reactor: {\"outlet_T_C\": 200}\n"
+            "Example column:  {\"reflux_ratio\": 1.5, \"light_key\": \"Ethanol\", "
+            "\"heavy_key\": \"Water\", \"light_key_recovery\": 0.99}"
         )
     )],
 ) -> dict:
     """
     Set operating specs on any unit operation — library process or custom.
 
+    KEY BEHAVIOUR for ConversionReactor:
+    Providing outlet_T_C automatically sets the reactor to isothermal mode
+    (CalcMode=1), which removes the 'energy stream required' error that DWSIM
+    raises in its default heat-balance mode.  Always set outlet_T_C on reactors
+    before running the simulation.
+
     Use this whenever the user specifies operating parameters in their prompt:
     e.g. 'use reflux ratio 2.0', 'set outlet temperature 350°C',
     'condenser pressure 1.5 bar', 'compressor efficiency 80%'.
-
-    Returns tag, detected DWSIM type, list of properties applied, and any specs
-    that could not be matched (useful for debugging API property name mismatches).
     """
     return _dwsim.configure_unit_operation(tag, specs)
 
