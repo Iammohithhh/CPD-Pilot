@@ -219,21 +219,48 @@ add("ShortcutColumn",    "T-13",    1600,   500)
 print("Unit operations added.")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6.  Add material streams  (feed + product streams)
+# 6.  Add ALL streams (feeds, products, and every inter-unit stream)
+#     Pre-defining every stream eliminates auto-creation and gives full
+#     control over port assignments.
 # ─────────────────────────────────────────────────────────────────────────────
 
 print("\nAdding streams...")
 
-STREAMS = {
-    "BENZENE-FEED":     ("MaterialStream",  50,  100),
-    "H2-FEED":          ("MaterialStream",  50,  500),
-    "SULFOLANE-MAKEUP": ("MaterialStream", 1100, 600),
-    "H2-PURGE":         ("MaterialStream", 1250, 300),
+ALL_STREAMS = {
+    # ── Feed streams ──────────────────────────────────────────────────────────
+    "BENZENE-FEED":       ( 50,  100),
+    "H2-FEED":            ( 50,  500),
+    "SULFOLANE-MAKEUP":   (1100, 600),
+    "H2-PURGE":           (1250, 350),
+    # ── Cyclohexane product (T-10 distillate) ────────────────────────────────
+    "CYH-PRODUCT":        (1450, 300),
+    # ── Internal inter-unit streams (named for readability) ──────────────────
+    "S-RECBZ-MIXBZ":      ( 150, 200),  # REC-BZ → MIX-BZ
+    "S-MIXBZ-P01":        ( 200, 200),  # MIX-BZ → P-01
+    "S-P01-MIX03":        ( 280, 260),  # P-01   → MIX-03
+    "S-K02-MIX03":        ( 200, 380),  # K-02   → MIX-03
+    "S-RECH2-MIX03":      ( 200, 300),  # REC-H2 → MIX-03
+    "S-MIX03-HEX04":      ( 430, 300),  # MIX-03 → HEX-04
+    "S-HEX04-R05":        ( 575, 300),  # HEX-04 → R-05
+    "S-R05-HEX06":        ( 725, 300),  # R-05   → HEX-06  ← critical
+    "S-HEX06-V07":        ( 875, 300),  # HEX-06 → V-07
+    "S-V07-SPL08":        (1025, 250),  # V-07 vapour → SPL-08
+    "S-V07-VLV09":        (1025, 380),  # V-07 liquid → VLV-09a
+    "S-SPL08-K19":        (1100, 150),  # SPL-08 → K-19
+    "S-K19-RECH2":        (1175, 150),  # K-19   → REC-H2
+    "S-VLV09-MIXT10":     (1200, 450),  # VLV-09a → MIX-T10
+    "S-RCSUL-MIXT10":     (1450, 700),  # REC-SUL → MIX-T10
+    "S-MIXT10-T10":       (1375, 400),  # MIX-T10 → T-10
+    "S-T10-T13":          (1525, 460),  # T-10 bottoms → T-13
+    "S-T13-RECBZ":        (1700, 300),  # T-13 distillate → REC-BZ
+    "S-T13-P09":          (1700, 500),  # T-13 bottoms → P-09
+    "S-P09-RCSUL":        (1650, 600),  # P-09 → REC-SUL
 }
-for tag, (stype, sx, sy) in STREAMS.items():
-    add(stype, tag, sx, sy)
 
-print("Streams added.")
+for tag, (sx, sy) in ALL_STREAMS.items():
+    add("MaterialStream", tag, sx, sy)
+
+print(f"Streams added ({len(ALL_STREAMS)} total).")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 7.  Set feed stream conditions
@@ -263,141 +290,109 @@ set_stream("SULFOLANE-MAKEUP",  60,  1.5,     20,  [0.0,  0.0,  0.0, 1.0])
 set_stream("H2-PURGE",          40, 30.0,      8,  [0.0,  1.0,  0.0, 0.0])
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 8.  Connect objects
+# 8.  Connect objects — fully explicit (from_tag, from_port, to_tag, to_port)
+#     Every stream pre-defined above; no auto-creation of intermediate streams.
+#     All connections are stream↔unit-op pairs so DWSIM registers them fully.
 # ─────────────────────────────────────────────────────────────────────────────
 
 print("\nConnecting objects...")
 
+# Format: (from_tag, from_port, to_tag, to_port)
+# Streams have one output connector (port 0) and one input connector (port 0).
+# Unit ops: output ports 0,1,2... in order; input ports 0,1,2... in order.
 CONNECTIONS = [
-    # Benzene feed
-    ("BENZENE-FEED",   "MIX-BZ"),
-    ("REC-BZ",         "MIX-BZ"),
-    ("MIX-BZ",         "P-01"),
-    # H2 feed
-    ("H2-FEED",        "K-02"),
-    # Reactor feed mixer
-    ("P-01",           "MIX-03"),
-    ("K-02",           "MIX-03"),
-    ("REC-H2",         "MIX-03"),
-    # Reaction path
-    ("MIX-03",         "HEX-04"),
-    ("HEX-04",         "R-05"),
-    ("R-05",           "HEX-06"),
-    ("HEX-06",         "V-07"),
-    # Flash (vapour first, then liquid)
-    ("V-07",           "SPL-08"),
-    ("V-07",           "VLV-09a"),
-    # H2 splitter
-    ("SPL-08",         "K-19"),
-    ("SPL-08",         "H2-PURGE"),
-    # H2 recycle
-    ("K-19",           "REC-H2"),
-    # Liquid path
-    ("VLV-09a",        "MIX-T10"),
-    ("REC-SUL",        "MIX-T10"),
-    ("SULFOLANE-MAKEUP","MIX-T10"),
-    ("MIX-T10",        "T-10"),
-    # T-10 distillate is product (no downstream connection — it's the product stream)
-    ("T-10",           "T-13"),       # T-10 bottoms → T-13
-    # T-13 outlets
-    ("T-13",           "REC-BZ"),     # distillate (benzene) → recycle block
-    ("T-13",           "P-09"),       # bottoms (sulfolane) → pump
-    ("P-09",           "REC-SUL"),
+    # ── Benzene feed ──────────────────────────────────────────────────────────
+    ("BENZENE-FEED",    0,  "MIX-BZ",         0),  # fresh benzene → mixer inlet 0
+    ("REC-BZ",          0,  "S-RECBZ-MIXBZ",  0),  # recycle block → stream
+    ("S-RECBZ-MIXBZ",   0,  "MIX-BZ",         1),  # stream → mixer inlet 1
+    ("MIX-BZ",          0,  "S-MIXBZ-P01",    0),  # mixer → stream
+    ("S-MIXBZ-P01",     0,  "P-01",           0),  # stream → pump
+    # ── H2 feed ───────────────────────────────────────────────────────────────
+    ("H2-FEED",         0,  "K-02",           0),  # fresh H2 → compressor
+    # ── Reactor feed mixer ────────────────────────────────────────────────────
+    ("P-01",            0,  "S-P01-MIX03",    0),
+    ("S-P01-MIX03",     0,  "MIX-03",         0),
+    ("K-02",            0,  "S-K02-MIX03",    0),
+    ("S-K02-MIX03",     0,  "MIX-03",         1),
+    ("REC-H2",          0,  "S-RECH2-MIX03",  0),
+    ("S-RECH2-MIX03",   0,  "MIX-03",         2),
+    # ── Reaction path ─────────────────────────────────────────────────────────
+    ("MIX-03",          0,  "S-MIX03-HEX04",  0),
+    ("S-MIX03-HEX04",   0,  "HEX-04",         0),
+    ("HEX-04",          0,  "S-HEX04-R05",    0),
+    ("S-HEX04-R05",     0,  "R-05",           0),
+    ("R-05",            0,  "S-R05-HEX06",    0),  # ← reactor MATERIAL outlet (port 0)
+    ("S-R05-HEX06",     0,  "HEX-06",         0),
+    ("HEX-06",          0,  "S-HEX06-V07",    0),
+    ("S-HEX06-V07",     0,  "V-07",           0),
+    # ── Flash: port 0 = vapour, port 1 = liquid ───────────────────────────────
+    ("V-07",            0,  "S-V07-SPL08",    0),  # vapour outlet
+    ("S-V07-SPL08",     0,  "SPL-08",         0),
+    ("V-07",            1,  "S-V07-VLV09",    0),  # liquid outlet
+    ("S-V07-VLV09",     0,  "VLV-09a",        0),
+    # ── H2 splitter ───────────────────────────────────────────────────────────
+    ("SPL-08",          0,  "S-SPL08-K19",    0),  # 90% → compressor
+    ("S-SPL08-K19",     0,  "K-19",           0),
+    ("SPL-08",          1,  "H2-PURGE",       0),  # 10% → purge stream
+    # ── H2 recycle ────────────────────────────────────────────────────────────
+    ("K-19",            0,  "S-K19-RECH2",    0),
+    ("S-K19-RECH2",     0,  "REC-H2",         0),
+    # ── Liquid path ───────────────────────────────────────────────────────────
+    ("VLV-09a",         0,  "S-VLV09-MIXT10", 0),
+    ("S-VLV09-MIXT10",  0,  "MIX-T10",        0),
+    ("REC-SUL",         0,  "S-RCSUL-MIXT10", 0),
+    ("S-RCSUL-MIXT10",  0,  "MIX-T10",        1),
+    ("SULFOLANE-MAKEUP", 0, "MIX-T10",        2),
+    ("MIX-T10",         0,  "S-MIXT10-T10",   0),
+    ("S-MIXT10-T10",    0,  "T-10",           0),
+    # ── T-10: port 0 = distillate (CYH product), port 1 = bottoms ────────────
+    ("T-10",            0,  "CYH-PRODUCT",    0),  # distillate = cyclohexane
+    ("T-10",            1,  "S-T10-T13",      0),  # bottoms → T-13
+    ("S-T10-T13",       0,  "T-13",           0),
+    # ── T-13: port 0 = distillate (benzene), port 1 = bottoms (sulfolane) ─────
+    ("T-13",            0,  "S-T13-RECBZ",    0),
+    ("S-T13-RECBZ",     0,  "REC-BZ",         0),
+    ("T-13",            1,  "S-T13-P09",      0),
+    ("S-T13-P09",       0,  "P-09",           0),
+    ("P-09",            0,  "S-P09-RCSUL",    0),
+    ("S-P09-RCSUL",     0,  "REC-SUL",        0),
 ]
 
-_auto_stream_counter = [0]
-_used_out_ports = {}   # unit-op tag -> count of output ports already used
-_used_in_ports  = {}   # unit-op tag -> count of input  ports already used
-
-def _next_out(tag):
-    n = _used_out_ports.get(tag, 0)
-    _used_out_ports[tag] = n + 1
-    return n
-
-def _next_in(tag):
-    n = _used_in_ports.get(tag, 0)
-    _used_in_ports[tag] = n + 1
-    return n
-
 def _do_connect(from_go, to_go, src, dst):
-    """Try every known DWSIM connection API until one works."""
-    errors = []
     for attempt in [
         lambda: sim.ConnectObjects(from_go, to_go, src, dst),
         lambda: interf.ConnectObjects(sim, from_go, to_go, src, dst),
-        lambda: interf.ConnectObjects(from_go, to_go, src, dst),
     ]:
         try:
             attempt()
             return True
-        except Exception as e:
-            errors.append(str(e))
-    raise RuntimeError(" | ".join(errors))
-
-
-def connect(from_tag, to_tag):
-    from_obj = registry[from_tag]
-    to_obj   = registry[to_tag]
-
-    def _is_stream(t):
-        try:
-            tn = registry[t].GraphicObject.ObjectType.ToString()
-            return tn in ("MaterialStream", "EnergyStream")
         except Exception:
-            return t.endswith("-FEED") or t.endswith("-PURGE") or t.endswith("-MAKEUP")
+            pass
+    raise RuntimeError(f"ConnectObjects failed: {from_go.Tag} port{src} → {to_go.Tag} port{dst}")
 
-    from_is_stream = _is_stream(from_tag)
-    to_is_stream   = _is_stream(to_tag)
+ok_count = 0
+for (from_tag, from_port, to_tag, to_port) in CONNECTIONS:
+    try:
+        f_go = registry[from_tag].GraphicObject
+        t_go = registry[to_tag].GraphicObject
+        _do_connect(f_go, t_go, from_port, to_port)
+        print(f"  {from_tag}[{from_port}] → {to_tag}[{to_port}]")
+        ok_count += 1
+    except Exception as e:
+        print(f"  ERROR: {from_tag}[{from_port}] → {to_tag}[{to_port}]: {e}")
 
-    if from_is_stream and to_is_stream:
-        # stream → stream: shouldn't happen but handle gracefully
-        try:
-            _do_connect(from_obj.GraphicObject, to_obj.GraphicObject, 0, 0)
-            print(f"  {from_tag} → {to_tag}")
-        except Exception as e:
-            print(f"  ERROR {from_tag} → {to_tag}: {e}")
+print(f"Connections: {ok_count}/{len(CONNECTIONS)} OK")
 
-    elif from_is_stream:
-        # feed stream → unit-op: stream outlet (0) → unit-op next inlet
-        dst = _next_in(to_tag)
-        try:
-            _do_connect(from_obj.GraphicObject, to_obj.GraphicObject, 0, dst)
-            print(f"  {from_tag} → {to_tag}  (dst_port={dst})")
-        except Exception as e:
-            print(f"  ERROR {from_tag} → {to_tag}: {e}")
-
-    elif to_is_stream:
-        # unit-op → product/purge stream: unit-op next outlet → stream inlet (0)
-        src = _next_out(from_tag)
-        try:
-            _do_connect(from_obj.GraphicObject, to_obj.GraphicObject, src, 0)
-            print(f"  {from_tag} → {to_tag}  (src_port={src})")
-        except Exception as e:
-            print(f"  ERROR {from_tag} → {to_tag}: {e}")
-
-    else:
-        # unit-op → unit-op: create intermediate material stream
-        _auto_stream_counter[0] += 1
-        mid_tag = f"_MS{_auto_stream_counter[0]:03d}"
-        try:
-            fx = int(from_obj.GraphicObject.X);  fy = int(from_obj.GraphicObject.Y)
-            tx = int(to_obj.GraphicObject.X);    ty = int(to_obj.GraphicObject.Y)
-            mx, my = (fx + tx) // 2, (fy + ty) // 2
-        except Exception:
-            mx, my = 700, 300
-        add("MaterialStream", mid_tag, mx, my)
-        mid_obj = registry[mid_tag]
-        src = _next_out(from_tag)
-        dst = _next_in(to_tag)
-        try:
-            _do_connect(from_obj.GraphicObject, mid_obj.GraphicObject, src, 0)
-            _do_connect(mid_obj.GraphicObject,  to_obj.GraphicObject,  0,   dst)
-            print(f"  {from_tag} →[{mid_tag}]→ {to_tag}  (src={src}, dst={dst})")
-        except Exception as e:
-            print(f"  ERROR {from_tag} → {to_tag}: {e}")
-
-for (a, b) in CONNECTIONS:
-    connect(a, b)
+# DIAGNOSTIC: verify R-05 output connector IsAttached
+print("\nDIAGNOSTIC — R-05 output connectors:")
+try:
+    r05_go = registry["R-05"].GraphicObject
+    for i, c in enumerate(r05_go.OutputConnectors):
+        attached = c.IsAttached
+        target = c.AttachedConnector.AttachedToObjID if attached else "—"
+        print(f"  Out[{i}]: IsAttached={attached}  →  {target}")
+except Exception as e:
+    print(f"  (check failed: {e})")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 9.  Set up the reaction:  C6H6 + 3 H2 → C6H12  (99.9% conversion)
