@@ -300,14 +300,26 @@ CONNECTIONS = [
 ]
 
 _auto_stream_counter = [0]
+_used_out_ports = {}   # unit-op tag -> count of output ports already used
+_used_in_ports  = {}   # unit-op tag -> count of input  ports already used
 
-def _do_connect(from_go, to_go):
+def _next_out(tag):
+    n = _used_out_ports.get(tag, 0)
+    _used_out_ports[tag] = n + 1
+    return n
+
+def _next_in(tag):
+    n = _used_in_ports.get(tag, 0)
+    _used_in_ports[tag] = n + 1
+    return n
+
+def _do_connect(from_go, to_go, src, dst):
     """Try every known DWSIM connection API until one works."""
     errors = []
     for attempt in [
-        lambda: sim.ConnectObjects(from_go, to_go, -1, -1),
-        lambda: interf.ConnectObjects(sim, from_go, to_go, -1, -1),
-        lambda: interf.ConnectObjects(from_go, to_go, -1, -1),
+        lambda: sim.ConnectObjects(from_go, to_go, src, dst),
+        lambda: interf.ConnectObjects(sim, from_go, to_go, src, dst),
+        lambda: interf.ConnectObjects(from_go, to_go, src, dst),
     ]:
         try:
             attempt()
@@ -328,30 +340,55 @@ def connect(from_tag, to_tag):
         except Exception:
             return t.endswith("-FEED") or t.endswith("-PURGE") or t.endswith("-MAKEUP")
 
-    if _is_stream(from_tag) or _is_stream(to_tag):
+    from_is_stream = _is_stream(from_tag)
+    to_is_stream   = _is_stream(to_tag)
+
+    if from_is_stream and to_is_stream:
+        # stream → stream: shouldn't happen but handle gracefully
         try:
-            _do_connect(from_obj.GraphicObject, to_obj.GraphicObject)
+            _do_connect(from_obj.GraphicObject, to_obj.GraphicObject, 0, 0)
             print(f"  {from_tag} → {to_tag}")
         except Exception as e:
-            print(f"  ERROR connecting {from_tag} → {to_tag}: {e}")
-        return
+            print(f"  ERROR {from_tag} → {to_tag}: {e}")
 
-    # Both are unit ops — create intermediate stream
-    _auto_stream_counter[0] += 1
-    mid_tag = f"_MS{_auto_stream_counter[0]:03d}"
-    try:
-        fx = int(from_obj.GraphicObject.X);  fy = int(from_obj.GraphicObject.Y)
-        tx = int(to_obj.GraphicObject.X);    ty = int(to_obj.GraphicObject.Y)
-        mx, my = (fx + tx) // 2, (fy + ty) // 2
-    except Exception:
-        mx, my = 700, 300
-    mid_obj = add("MaterialStream", mid_tag, mx, my)
-    try:
-        _do_connect(from_obj.GraphicObject, mid_obj.GraphicObject)
-        _do_connect(mid_obj.GraphicObject, to_obj.GraphicObject)
-        print(f"  {from_tag} → [{mid_tag}] → {to_tag}")
-    except Exception as e:
-        print(f"  ERROR {from_tag} → {to_tag}: {e}")
+    elif from_is_stream:
+        # feed stream → unit-op: stream outlet (0) → unit-op next inlet
+        dst = _next_in(to_tag)
+        try:
+            _do_connect(from_obj.GraphicObject, to_obj.GraphicObject, 0, dst)
+            print(f"  {from_tag} → {to_tag}  (dst_port={dst})")
+        except Exception as e:
+            print(f"  ERROR {from_tag} → {to_tag}: {e}")
+
+    elif to_is_stream:
+        # unit-op → product/purge stream: unit-op next outlet → stream inlet (0)
+        src = _next_out(from_tag)
+        try:
+            _do_connect(from_obj.GraphicObject, to_obj.GraphicObject, src, 0)
+            print(f"  {from_tag} → {to_tag}  (src_port={src})")
+        except Exception as e:
+            print(f"  ERROR {from_tag} → {to_tag}: {e}")
+
+    else:
+        # unit-op → unit-op: create intermediate material stream
+        _auto_stream_counter[0] += 1
+        mid_tag = f"_MS{_auto_stream_counter[0]:03d}"
+        try:
+            fx = int(from_obj.GraphicObject.X);  fy = int(from_obj.GraphicObject.Y)
+            tx = int(to_obj.GraphicObject.X);    ty = int(to_obj.GraphicObject.Y)
+            mx, my = (fx + tx) // 2, (fy + ty) // 2
+        except Exception:
+            mx, my = 700, 300
+        add("MaterialStream", mid_tag, mx, my)
+        mid_obj = registry[mid_tag]
+        src = _next_out(from_tag)
+        dst = _next_in(to_tag)
+        try:
+            _do_connect(from_obj.GraphicObject, mid_obj.GraphicObject, src, 0)
+            _do_connect(mid_obj.GraphicObject,  to_obj.GraphicObject,  0,   dst)
+            print(f"  {from_tag} →[{mid_tag}]→ {to_tag}  (src={src}, dst={dst})")
+        except Exception as e:
+            print(f"  ERROR {from_tag} → {to_tag}: {e}")
 
 for (a, b) in CONNECTIONS:
     connect(a, b)
