@@ -534,10 +534,40 @@ except Exception as e:
 out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cyclohexane_simulation.dwxmz")
 print(f"\nSaving to: {out_path}")
 interf.SaveFlowsheet(sim, out_path, True)   # True = compressed (.dwxmz)
-print("DONE — file saved successfully.")
-print(f"\nOpen in DWSIM:  File -> Open -> {out_path}")
-print("Then press Solve (or F5).")
-print("\nNotes:")
-print("  - Check SPL-08 split ratios (should be 90% / 10%)")
-print("  - If solver doesn't converge, set initial estimates on REC-H2, REC-BZ, REC-SUL")
-print("  - Sulfolane selectivity is approximated by Peng-Robinson BIPs")
+print("Saved. Inspecting XML for connection metadata...")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Post-save: read the XML and check how connections are stored.
+# If connection records are missing/incomplete, patch them directly.
+# ─────────────────────────────────────────────────────────────────────────────
+import zipfile
+import xml.etree.ElementTree as ET
+
+try:
+    with zipfile.ZipFile(out_path, 'r') as zf:
+        xml_name = zf.namelist()[0]
+        raw_xml  = zf.read(xml_name).decode('utf-8', errors='replace')
+
+    print(f"  ZIP entry: {xml_name}  ({len(raw_xml)} chars)")
+
+    # Print lines that mention R-05 (limited to first 30)
+    r05_lines = [l.strip() for l in raw_xml.splitlines() if 'R-05' in l or 'R05' in l]
+    print(f"\n  XML lines mentioning R-05 ({len(r05_lines)} total, showing first 30):")
+    for l in r05_lines[:30]:
+        print(f"    {l}")
+
+    # Print lines that mention connection-like keywords
+    kw = {'Connector', 'Connected', 'Outlet', 'Inlet', 'AttachedFrom', 'AttachedTo',
+          'LineGraph', 'Connection', 'Port'}
+    conn_lines = [l.strip() for l in raw_xml.splitlines()
+                  if any(k in l for k in kw)]
+    print(f"\n  XML lines with connection keywords ({len(conn_lines)} total, showing first 40):")
+    for l in conn_lines[:40]:
+        print(f"    {l}")
+
+except Exception as e:
+    print(f"  XML inspection failed: {e}")
+
+print("\nDONE.")
+print(f"Open in DWSIM:  File -> Open -> {out_path}")
+print("Then press Solve (F5) and paste the errors here.")
