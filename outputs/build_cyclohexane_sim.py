@@ -383,16 +383,16 @@ for (from_tag, from_port, to_tag, to_port) in CONNECTIONS:
 
 print(f"Connections: {ok_count}/{len(CONNECTIONS)} OK")
 
-# DIAGNOSTIC: verify R-05 output connector IsAttached
-print("\nDIAGNOSTIC — R-05 output connectors:")
-try:
-    r05_go = registry["R-05"].GraphicObject
-    for i, c in enumerate(r05_go.OutputConnectors):
-        attached = c.IsAttached
-        target = c.AttachedConnector.AttachedToObjID if attached else "—"
-        print(f"  Out[{i}]: IsAttached={attached}  →  {target}")
-except Exception as e:
-    print(f"  (check failed: {e})")
+# DIAGNOSTIC: verify key connectors IsAttached
+print("\nDIAGNOSTIC — connector IsAttached check:")
+for check_tag in ["R-05", "HEX-04", "V-07", "T-10"]:
+    try:
+        go = registry[check_tag].GraphicObject
+        out_states = [c.IsAttached for c in go.OutputConnectors]
+        in_states  = [c.IsAttached for c in go.InputConnectors]
+        print(f"  {check_tag}: inputs={in_states}  outputs={out_states}")
+    except Exception as e:
+        print(f"  {check_tag}: (check failed: {e})")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 9.  Set up the reaction:  C6H6 + 3 H2 → C6H12  (99.9% conversion)
