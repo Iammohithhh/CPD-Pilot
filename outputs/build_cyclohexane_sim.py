@@ -301,6 +301,22 @@ CONNECTIONS = [
 
 _auto_stream_counter = [0]
 
+def _do_connect(from_go, to_go):
+    """Try every known DWSIM connection API until one works."""
+    errors = []
+    for attempt in [
+        lambda: sim.ConnectObjects(from_go, to_go, -1, -1),
+        lambda: interf.ConnectObjects(sim, from_go, to_go, -1, -1),
+        lambda: interf.ConnectObjects(from_go, to_go, -1, -1),
+    ]:
+        try:
+            attempt()
+            return True
+        except Exception as e:
+            errors.append(str(e))
+    raise RuntimeError(" | ".join(errors))
+
+
 def connect(from_tag, to_tag):
     from_obj = registry[from_tag]
     to_obj   = registry[to_tag]
@@ -314,12 +330,11 @@ def connect(from_tag, to_tag):
 
     if _is_stream(from_tag) or _is_stream(to_tag):
         try:
-            interf.ConnectObjects(sim, from_obj.GraphicObject, to_obj.GraphicObject, -1, -1)
+            _do_connect(from_obj.GraphicObject, to_obj.GraphicObject)
             print(f"  {from_tag} → {to_tag}")
-            return
         except Exception as e:
             print(f"  ERROR connecting {from_tag} → {to_tag}: {e}")
-            return
+        return
 
     # Both are unit ops — create intermediate stream
     _auto_stream_counter[0] += 1
@@ -332,8 +347,8 @@ def connect(from_tag, to_tag):
         mx, my = 700, 300
     mid_obj = add("MaterialStream", mid_tag, mx, my)
     try:
-        interf.ConnectObjects(sim, from_obj.GraphicObject, mid_obj.GraphicObject, -1, -1)
-        interf.ConnectObjects(sim, mid_obj.GraphicObject, to_obj.GraphicObject, -1, -1)
+        _do_connect(from_obj.GraphicObject, mid_obj.GraphicObject)
+        _do_connect(mid_obj.GraphicObject, to_obj.GraphicObject)
         print(f"  {from_tag} → [{mid_tag}] → {to_tag}")
     except Exception as e:
         print(f"  ERROR {from_tag} → {to_tag}: {e}")
@@ -390,60 +405,39 @@ def cfg(tag, **kwargs):
         print(f"  SKIP {tag}: not in registry")
         return
     for attr, val in kwargs.items():
-        # Try multiple attribute names per spec
-        ATTR_MAP = {
-            "outlet_T_C": [
-                ("OutletTemperature",    val + 273.15),
-                ("CalculationMode",      0),
-            ],
-            "outlet_P_bar": [
-                ("OutletPressure",       val * 1e5),
-                ("Pout",                 val * 1e5),
-            ],
-            "efficiency": [
-                ("AdiabaticEfficiency",  val),
-                ("Efficiency",           val),
-            ],
-            "T_C": [
-                ("FlashTemperature",     val + 273.15),
-                ("Temperature",          val + 273.15),
-            ],
-            "P_bar": [
-                ("FlashPressure",        val * 1e5),
-                ("Pressure",             val * 1e5),
-            ],
-            "split_fraction": [
-                ("SplitRatios",          None),   # handled separately
-            ],
-            "condenser_P_bar": [
-                ("CondenserPressure",    val * 1e5),
-            ],
-            "reboiler_P_bar": [
-                ("ReboilerPressure",     val * 1e5),
-            ],
-            "reflux_ratio": [
-                ("RefluxRatio",          val),
-            ],
-            "light_key": [
-                ("LightKeyComponent",    val),
-            ],
-            "heavy_key": [
-                ("HeavyKeyComponent",    val),
-            ],
-            "light_key_recovery": [
-                ("LightKeyComponentRecovery", val),
-            ],
-            "heavy_key_recovery": [
-                ("HeavyKeyComponentRecovery", val),
-            ],
-            "condenser_type": [
-                ("CondenserType",        val),
-            ],
-        }
-        pairs = ATTR_MAP.get(attr, [(attr, val)])
+        # Build pairs lazily so numeric operations only happen for matching attr
+        if attr == "outlet_T_C":
+            pairs = [("OutletTemperature", val + 273.15), ("CalculationMode", 0)]
+        elif attr == "outlet_P_bar":
+            pairs = [("OutletPressure", val * 1e5), ("Pout", val * 1e5)]
+        elif attr == "efficiency":
+            pairs = [("AdiabaticEfficiency", val), ("Efficiency", val)]
+        elif attr == "T_C":
+            pairs = [("FlashTemperature", val + 273.15), ("Temperature", val + 273.15)]
+        elif attr == "P_bar":
+            pairs = [("FlashPressure", val * 1e5), ("Pressure", val * 1e5)]
+        elif attr == "condenser_P_bar":
+            pairs = [("CondenserPressure", val * 1e5)]
+        elif attr == "reboiler_P_bar":
+            pairs = [("ReboilerPressure", val * 1e5)]
+        elif attr == "reflux_ratio":
+            pairs = [("RefluxRatio", val)]
+        elif attr == "light_key":
+            pairs = [("LightKeyComponent", val)]
+        elif attr == "heavy_key":
+            pairs = [("HeavyKeyComponent", val)]
+        elif attr == "light_key_recovery":
+            pairs = [("LightKeyComponentRecovery", val)]
+        elif attr == "heavy_key_recovery":
+            pairs = [("HeavyKeyComponentRecovery", val)]
+        elif attr == "condenser_type":
+            pairs = [("CondenserType", val)]
+        elif attr == "split_fraction":
+            continue  # handled separately via SplitRatios array
+        else:
+            pairs = [(attr, val)]
+
         for prop_name, prop_val in pairs:
-            if prop_val is None:
-                continue
             try:
                 setattr(obj, prop_name, prop_val)
             except Exception:
