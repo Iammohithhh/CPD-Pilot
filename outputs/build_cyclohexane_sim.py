@@ -121,6 +121,12 @@ print("DWSIM assemblies loaded OK")
 interf = Automation3()
 sim = interf.CreateFlowsheet()
 
+# DIAGNOSTIC: find connection-related methods on interf and sim
+_interf_connect = sorted([m for m in dir(interf) if 'onnect' in m.lower()])
+_sim_connect    = sorted([m for m in dir(sim)    if 'onnect' in m.lower()])
+print(f"\nDIAGNOSTIC — interf connect methods: {_interf_connect}")
+print(f"DIAGNOSTIC — sim    connect methods: {_sim_connect}\n")
+
 # Compounds  (order matters — composition arrays use this order)
 COMPOUNDS = ["Benzene", "Hydrogen", "Cyclohexane", "Sulfolane"]
 for c in COMPOUNDS:
