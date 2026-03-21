@@ -614,45 +614,63 @@ PROCESS_LIBRARY = {
         "compounds": ["Benzene", "Hydrogen", "Cyclohexane", "Sulfolane"],
         "thermo_model": "Peng-Robinson",
         "unit_operations": [
-            # ── Feed pressurisation ───────────────────────────────────────────
+            # ── Benzene feed section ──────────────────────────────────────────
+            # MIX-BZ combines fresh benzene + recycled benzene from T-13 overhead.
+            # A Pump (P-01) only has ONE inlet port, so mixing must happen first.
+            {"type": "Mixer",            "name": "MIX-BZ",
+             "purpose": "Benzene feed mixer: combine fresh benzene (BENZENE-FEED) + recovered benzene recycle from T-13 overhead (REC-BZ outlet)"},
             {"type": "Pump",             "name": "P-01",
-             "purpose": "Benzene feed pump: raise liquid benzene from storage pressure to reactor pressure (30 bar)"},
+             "purpose": "Benzene feed pump: raise mixed benzene from storage pressure to reactor pressure (30 bar)"},
             {"type": "Compressor",       "name": "K-02",
              "purpose": "Fresh H₂ feed compressor: raise hydrogen supply (5 bar) to reactor pressure (30 bar)"},
             {"type": "Mixer",            "name": "MIX-03",
-             "purpose": "Feed mixer: combine pressurised benzene (from P-01) + fresh H₂ (from K-02) + recycled H₂ (from K-19)"},
+             "purpose": "Reactor feed mixer: combine pressurised benzene (P-01) + fresh H₂ (K-02) + recycled H₂ (REC-H2 outlet)"},
             # ── Reaction section ──────────────────────────────────────────────
             {"type": "Heater",           "name": "HEX-04",
-             "purpose": "Feed preheater (HEX-01 in PFD): heat mixed feed to 200 °C using medium-pressure steam"},
+             "purpose": "Feed preheater: heat mixed feed to 200 °C using medium-pressure steam"},
             {"type": "ConversionReactor","name": "R-05",
              "purpose": "Fixed-bed hydrogenation reactor: C₆H₆ + 3 H₂ → C₆H₁₂, Ni/Al₂O₃, 200 °C, 30 bar, 99.9% conversion"},
             {"type": "Cooler",           "name": "HEX-06",
-             "purpose": "Reactor effluent cooler (HEX-02 in PFD): cool from 200 °C to 40 °C using cooling water"},
+             "purpose": "Reactor effluent cooler: cool from 200 °C to 40 °C using cooling water"},
             # ── Flash & H₂ recycle ────────────────────────────────────────────
             {"type": "Flash",            "name": "V-07",
-             "purpose": "High-pressure flash drum: separate unreacted H₂ vapour from liquid cyclohexane/benzene at 30 bar, 40 °C"},
+             "purpose": "High-pressure flash drum: separate unreacted H₂ vapour (→ SPL-08) from liquid cyclohexane/benzene (→ VLV-09a) at 30 bar, 40 °C"},
             {"type": "Splitter",         "name": "SPL-08",
-             "purpose": "H₂ vapour splitter: 90% recycle fraction to K-19, 10% purge to prevent inert build-up"},
-            {"type": "Valve",            "name": "VLV-09a",
-             "purpose": "Liquid let-down valve: reduce flash liquid from 30 bar to column pressure (1.5 bar) before extractive distillation"},
+             "purpose": "H₂ vapour splitter: 90% → K-19 recycle, 10% → H2-PURGE"},
             {"type": "Compressor",       "name": "K-19",
-             "purpose": "Recycle H₂ compressor: recompress recycled H₂ from flash pressure back to 30 bar for return to MIX-03"},
-            # ── Sulfolane make-up pump ────────────────────────────────────────
+             "purpose": "Recycle H₂ compressor: recompress recycled H₂ from 30 bar flash back to 30 bar for return to MIX-03"},
+            # REC-H2: Recycle convergence block for the H₂ recycle loop.
+            # Tear stream between K-19 and MIX-03; DWSIM iterates until convergence.
+            {"type": "Recycle",          "name": "REC-H2",
+             "purpose": "Recycle convergence block: tear stream for H₂ loop (K-19 → MIX-03)"},
+            {"type": "Valve",            "name": "VLV-09a",
+             "purpose": "Liquid let-down valve: reduce flash liquid from 30 bar to 1.5 bar before extractive distillation"},
+            # ── Sulfolane recycle pump & recycle block ────────────────────────
             {"type": "Pump",             "name": "P-09",
-             "purpose": "Sulfolane recycle pump: pump regenerated sulfolane from T-13 bottoms back to T-10 solvent feed tray"},
+             "purpose": "Sulfolane recycle pump: pump regenerated sulfolane from T-13 bottoms back to MIX-T10"},
+            # REC-SUL: Recycle convergence block for sulfolane loop.
+            {"type": "Recycle",          "name": "REC-SUL",
+             "purpose": "Recycle convergence block: tear stream for sulfolane loop (P-09 → MIX-T10)"},
+            # ── T-10 feed mixer ───────────────────────────────────────────────
+            # ShortcutColumn only has ONE inlet port — all feeds must be pre-mixed.
+            {"type": "Mixer",            "name": "MIX-T10",
+             "purpose": "T-10 feed mixer: combine process liquid (VLV-09a), sulfolane make-up (SULFOLANE-MAKEUP), and sulfolane recycle (REC-SUL outlet) before feeding T-10"},
             # ── Extractive distillation section ───────────────────────────────
             {"type": "ShortcutColumn",   "name": "T-10",
              "purpose": (
-                 "Extractive distillation column: sulfolane solvent (S/F ≈ 4 mol/mol) "
-                 "suppresses benzene volatility. Overhead = cyclohexane product (99+ wt%). "
-                 "Bottoms = benzene dissolved in sulfolane → T-13 for solvent recovery."
+                 "Extractive distillation column: sulfolane suppresses benzene volatility. "
+                 "Distillate = cyclohexane product (≥99 wt%). "
+                 "Bottoms = benzene + sulfolane → T-13."
              )},
+            # REC-BZ: Recycle convergence block for benzene loop.
+            {"type": "Recycle",          "name": "REC-BZ",
+             "purpose": "Recycle convergence block: tear stream for benzene recycle (T-13 distillate → MIX-BZ)"},
             {"type": "ShortcutColumn",   "name": "T-13",
              "purpose": (
-                 "Solvent recovery / benzene stripper: separate benzene from sulfolane under "
-                 "moderate vacuum to limit reboiler temperature (sulfolane degrades >220 °C). "
-                 "Overhead = recovered benzene → recycle to benzene feed. "
-                 "Bottoms = regenerated sulfolane → P-09 → T-10 solvent inlet."
+                 "Solvent recovery / benzene stripper: vacuum operation to keep reboiler below "
+                 "sulfolane degradation temperature (220 °C). "
+                 "Distillate = recovered benzene → REC-BZ → MIX-BZ. "
+                 "Bottoms = regenerated sulfolane → P-09 → REC-SUL → MIX-T10."
              )},
         ],
         "streams": [
@@ -676,68 +694,92 @@ PROCESS_LIBRARY = {
             },
             {
                 "name": "SULFOLANE-MAKEUP", "type": "material",
-                "description": "Fresh sulfolane make-up (small stream to compensate losses; bulk solvent comes from P-09 recycle)",
+                "description": "Fresh sulfolane make-up (compensates for losses; bulk solvent is P-09 recycle)",
                 "T_C": 60, "P_bar": 1.5, "total_flow_kg_hr": 20,
                 "composition": {
                     "Benzene": 0.0, "Hydrogen": 0.0,
                     "Cyclohexane": 0.0, "Sulfolane": 1.0,
                 },
             },
+            {
+                "name": "H2-PURGE", "type": "material",
+                "description": "H₂ purge stream (10% of flash vapour) — prevents inert build-up",
+                "T_C": 40, "P_bar": 30.0, "total_flow_kg_hr": 8,
+                "composition": {
+                    "Benzene": 0.0, "Hydrogen": 1.0,
+                    "Cyclohexane": 0.0, "Sulfolane": 0.0,
+                },
+            },
         ],
         "connections": [
-            # ── Feed pressurisation ───────────────────────────────────────────
-            ("BENZENE-FEED",   "P-01"),
-            ("P-01",           "MIX-03"),
-            ("H2-FEED",        "K-02"),
-            ("K-02",           "MIX-03"),
+            # ── Benzene feed (with recycle mixer) ─────────────────────────────
+            # MIX-BZ combines fresh feed + benzene recycle (from REC-BZ).
+            # P-01 has ONLY 1 inlet → mixing must happen in MIX-BZ first.
+            ("BENZENE-FEED",  "MIX-BZ"),
+            ("REC-BZ",        "MIX-BZ"),    # benzene recycle loop closes here
+            ("MIX-BZ",        "P-01"),
+            # ── H₂ feed ───────────────────────────────────────────────────────
+            ("H2-FEED",       "K-02"),
+            # ── Reactor feed mixer ────────────────────────────────────────────
+            # MIX-03 has 3 inlets: pumped benzene, fresh H₂, recycled H₂.
+            ("P-01",          "MIX-03"),
+            ("K-02",          "MIX-03"),
+            ("REC-H2",        "MIX-03"),    # H₂ recycle loop closes here
             # ── Reaction path ─────────────────────────────────────────────────
-            ("MIX-03",         "HEX-04"),
-            ("HEX-04",         "R-05"),
-            ("R-05",           "HEX-06"),
-            ("HEX-06",         "V-07"),
-            # ── Flash outlets: VAPOUR port first, LIQUID port second ──────────
-            # DWSIM Flash assigns: port 0 = vapour, port 1 = liquid.
-            # Connection order here must match that port order.
-            ("V-07",           "SPL-08"),    # port 0 (vapour) → H₂ splitter
-            ("V-07",           "VLV-09a"),   # port 1 (liquid) → let-down valve
-            # ── H₂ recycle loop (closed) ──────────────────────────────────────
-            ("SPL-08",         "K-19"),      # recycle fraction (90%) → compressor
-            ("K-19",           "MIX-03"),    # recompressed H₂ → feed mixer (loop closed)
-            # SPL-08 purge port (10%) is a dead-end terminal stream in this build.
-            # ── Extractive distillation ───────────────────────────────────────
-            ("VLV-09a",        "T-10"),      # depressurised liquid feed → column
-            ("SULFOLANE-MAKEUP","T-10"),     # small sulfolane make-up → column
-            # T-10: port 0 = distillate (cyclohexane product), port 1 = bottoms
-            ("T-10",           "T-13"),      # bottoms (benzene + sulfolane) → stripper
-            # ── Solvent recovery & recycle loops (closed) ─────────────────────
-            # T-13: port 0 = distillate (benzene), port 1 = bottoms (sulfolane)
-            # Benzene distillate recycles to P-01 inlet (benzene feed loop).
-            ("T-13",           "P-01"),      # recovered benzene → benzene feed pump
-            # Sulfolane bottoms pump back to T-10 solvent tray.
-            ("T-13",           "P-09"),      # sulfolane bottoms → recycle pump
-            ("P-09",           "T-10"),      # pumped sulfolane → T-10 solvent inlet
+            ("MIX-03",        "HEX-04"),
+            ("HEX-04",        "R-05"),
+            ("R-05",          "HEX-06"),
+            ("HEX-06",        "V-07"),
+            # ── Flash: vapour outlet FIRST, liquid outlet SECOND ──────────────
+            # DWSIM Vessel/Flash: output connector 0 = vapour, 1 = liquid.
+            # auto-port (-1) picks ports in order, so vapour must be connected first.
+            ("V-07",          "SPL-08"),    # vapour → H₂ splitter
+            ("V-07",          "VLV-09a"),   # liquid → let-down valve
+            # ── H₂ splitter: first outlet = recycle (90%), second = purge (10%) ─
+            ("SPL-08",        "K-19"),      # recycle fraction → compressor
+            ("SPL-08",        "H2-PURGE"),  # purge fraction → product stream
+            # ── H₂ recycle loop with convergence block ────────────────────────
+            ("K-19",          "REC-H2"),    # K-19 outlet → tear-stream block
+            # REC-H2 outlet connects back to MIX-03 above (loop closed).
+            # ── Liquid depressurisation ───────────────────────────────────────
+            ("VLV-09a",       "MIX-T10"),   # depressurised liquid → T-10 feed mixer
+            # ── Sulfolane recycle loop with convergence block ─────────────────
+            ("REC-SUL",       "MIX-T10"),   # sulfolane recycle → T-10 feed mixer
+            ("SULFOLANE-MAKEUP","MIX-T10"), # make-up solvent → T-10 feed mixer
+            # MIX-T10 has ONE outlet → T-10 (ShortcutColumn has only 1 feed port).
+            ("MIX-T10",       "T-10"),
+            # ── T-10: distillate first (port 0), bottoms second (port 1) ──────
+            # Distillate = cyclohexane product (terminal — no downstream block).
+            # Bottoms = benzene + sulfolane → T-13.
+            ("T-10",          "T-13"),      # T-10 bottoms → solvent recovery column
+            # ── T-13: distillate first (port 0) = benzene → benzene recycle ───
+            ("T-13",          "REC-BZ"),    # T-13 distillate (benzene) → tear-stream block
+            # ── T-13: bottoms second (port 1) = sulfolane → solvent recycle ───
+            ("T-13",          "P-09"),      # T-13 bottoms (sulfolane) → recycle pump
+            ("P-09",          "REC-SUL"),   # pump outlet → tear-stream block
+            # REC-SUL outlet connects back to MIX-T10 above (loop closed).
         ],
         "unit_op_specs": {
-            # Feed pressurisation
+            # Feed section
             "P-01":    {"outlet_P_bar": 30,   "efficiency": 0.75},
             "K-02":    {"outlet_P_bar": 30,   "efficiency": 0.75},
-            # Preheater
+            # Preheater (isothermal mode — no energy stream needed)
             "HEX-04":  {"outlet_T_C": 200},
-            # Reactor — outlet_T_C forces isothermal mode in DWSIM ConversionReactor
+            # Reactor (isothermal mode via outlet_T_C)
             "R-05":    {"outlet_T_C": 200},
             # Effluent cooler
             "HEX-06":  {"outlet_T_C": 40},
-            # High-pressure flash
+            # High-pressure flash (PT flash)
             "V-07":    {"T_C": 40, "P_bar": 30},
-            # H₂ splitter: fraction 0 = recycle (90%), fraction 1 = purge (10%)
+            # H₂ splitter — first outlet (K-19) gets 90%, second (H2-PURGE) gets 10%
             "SPL-08":  {"split_fraction": 0.90},
             # Recycle compressor
             "K-19":    {"outlet_P_bar": 30,   "efficiency": 0.75},
-            # Liquid let-down valve
+            # Liquid let-down valve (CalcMode set automatically in configure_unit_operation)
             "VLV-09a": {"outlet_P_bar": 1.5},
             # Sulfolane recycle pump
             "P-09":    {"outlet_P_bar": 1.8,  "efficiency": 0.75},
-            # T-10: Extractive distillation — cyclohexane (light) vs benzene (heavy)
+            # T-10: Extractive distillation — cyclohexane (light key) vs benzene (heavy key)
             "T-10": {
                 "light_key":          "Cyclohexane",
                 "heavy_key":          "Benzene",
@@ -746,44 +788,51 @@ PROCESS_LIBRARY = {
                 "reflux_ratio":       5.0,
                 "condenser_P_bar":    1.5,
                 "reboiler_P_bar":     1.8,
-                "condenser_type":     0,        # 0 = total condenser
+                "condenser_type":     0,   # 0 = total condenser
             },
             # T-13: Solvent stripper — benzene (light) vs sulfolane (heavy)
-            # Moderate vacuum to keep reboiler below sulfolane degradation temp (~220 °C)
+            # Vacuum operation: reboiler stays below sulfolane degradation temp (220 °C)
             "T-13": {
                 "light_key":          "Benzene",
                 "heavy_key":          "Sulfolane",
                 "light_key_recovery": 0.99,
                 "heavy_key_recovery": 0.99,
                 "reflux_ratio":       2.0,
-                "condenser_P_bar":    0.15,     # ~150 mbar vacuum
+                "condenser_P_bar":    0.15,   # ~150 mbar vacuum
                 "reboiler_P_bar":     0.20,
                 "condenser_type":     0,
             },
         },
         "notes": (
-            "PFD TOPOLOGY (matches standard industrial layout):\n"
-            "  BENZENE-FEED → P-01 → MIX-03\n"
-            "  H2-FEED      → K-02 → MIX-03\n"
-            "  MIX-03 → HEX-04 (steam) → R-05 (reactor) → HEX-06 (CW) → V-07 (flash)\n"
-            "  V-07 vapour → SPL-08 → [purge | K-19 → MIX-03]  (H₂ recycle loop)\n"
-            "  V-07 liquid → VLV-09a → T-10 ← SULFOLANE-MAKEUP\n"
-            "                        ← P-09 ← T-13 bottoms      (sulfolane recycle loop)\n"
-            "  T-10 distillate = cyclohexane product\n"
-            "  T-10 bottoms    → T-13 → distillate (benzene) → P-01  (benzene recycle)\n"
-            "                         → bottoms (sulfolane)  → P-09  (solvent recycle)\n\n"
-            "RECYCLE LOOPS (all closed in this build):\n"
-            "  1. H₂ recycle:       SPL-08 → K-19 → MIX-03\n"
-            "  2. Benzene recycle:  T-13 distillate → P-01\n"
-            "  3. Sulfolane recycle: T-13 bottoms → P-09 → T-10\n\n"
-            "KNOWN DWSIM ISSUES:\n"
-            "  • T-13 has TWO outlet ports; DWSIM ShortcutColumn may only expose one "
-            "outlet in scripting. If the benzene-recycle connection (T-13 → P-01) fails, "
-            "leave it open-loop and manually connect in the GUI.\n"
-            "  • Sulfolane DWSIM name: try 'Sulfolane', 'Tetramethylene sulfone', "
-            "or search by CAS 126-33-0.\n"
-            "  • SPL-08 purge port (10%) is a terminal dead-end stream — add a "
-            "ProductStream block in the GUI if purge flow data are required."
+            "TOPOLOGY (with recycle blocks, all loops closed):\n"
+            "  BENZENE-FEED → MIX-BZ ←── REC-BZ ←── T-13 distillate  [benzene loop]\n"
+            "  MIX-BZ → P-01 → MIX-03\n"
+            "  H2-FEED → K-02 → MIX-03\n"
+            "  MIX-03 ←── REC-H2 ←── K-19 ←── SPL-08 (90%)           [H₂ loop]\n"
+            "  MIX-03 → HEX-04 → R-05 → HEX-06 → V-07\n"
+            "  V-07 vapour → SPL-08 → K-19 → REC-H2 → MIX-03\n"
+            "             → H2-PURGE (10%)\n"
+            "  V-07 liquid → VLV-09a → MIX-T10\n"
+            "  SULFOLANE-MAKEUP → MIX-T10\n"
+            "  MIX-T10 ←── REC-SUL ←── P-09 ←── T-13 bottoms         [sulfolane loop]\n"
+            "  MIX-T10 → T-10\n"
+            "  T-10 distillate = CYCLOHEXANE PRODUCT\n"
+            "  T-10 bottoms → T-13 → distillate → REC-BZ → MIX-BZ\n"
+            "                      → bottoms    → P-09 → REC-SUL → MIX-T10\n\n"
+            "RECYCLE BLOCK PLACEMENT:\n"
+            "  REC-H2  : tears the H₂ loop   (K-19 outlet / MIX-03 inlet)\n"
+            "  REC-BZ  : tears the benzene loop (T-13 distillate / MIX-BZ inlet)\n"
+            "  REC-SUL : tears the sulfolane loop (P-09 outlet / MIX-T10 inlet)\n\n"
+            "KNOWN DWSIM NOTES:\n"
+            "  • Sulfolane DWSIM name: 'Sulfolane' (CAS 126-33-0). If not found, "
+            "try 'Tetramethylene sulfone' or add via CAS search.\n"
+            "  • SPL-08 split ratios (90/10) must be confirmed in GUI after opening — "
+            "the scripting API sets them by stream tag and may need manual verification.\n"
+            "  • Recycle blocks (REC-H2, REC-BZ, REC-SUL) handle convergence. "
+            "Set their initial estimates in DWSIM GUI if solver does not converge "
+            "automatically (typical first-pass: use fresh feed conditions).\n"
+            "  • T-10 uses ShortcutColumn (simplified model). The sulfolane selectivity "
+            "is captured only approximately via PR binary interaction parameters."
         ),
     },
 

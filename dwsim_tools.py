@@ -277,6 +277,7 @@ def _obj_type(name: str):
         "CSTR": ObjectType.RCT_CSTR,
         "PFR": ObjectType.RCT_PFR,
         "ComponentSeparator": ObjectType.ComponentSeparator,
+        "Recycle":  ObjectType.Recycle,
     }
     if name not in _MAP:
         raise ValueError(f"Unknown unit operation type: '{name}'. "
@@ -990,6 +991,8 @@ def configure_unit_operation(tag: str, specs: dict) -> dict:
         if "outlet_P_bar" in specs or "outlet_P_Pa" in specs:
             P_Pa = (specs["outlet_P_Pa"] if "outlet_P_Pa" in specs
                     else specs["outlet_P_bar"] * 1e5)
+            # CalcMode 0 = outlet pressure (must be set before POut in some builds)
+            _try_set(["CalcMode", "CalculationMode"], 0, "CalcMode=OutletPressure")
             _try_set(["POut", "OutletPressure", "Pout"], P_Pa, "outlet_P_Pa")
 
     # ── Flash / Vessel / Separator ────────────────────────────────────────────
@@ -1093,20 +1096,59 @@ def configure_unit_operation(tag: str, specs: dict) -> dict:
     # ── Splitter (NodeOut) ────────────────────────────────────────────────────
     elif obj_type in ("NodeOut", "Splitter") or "plitter" in obj_type:
         if "split_fraction" in specs:
-            # split_fraction = fraction that leaves through the FIRST outlet.
+            # split_fraction = fraction leaving through the FIRST outlet.
             # Second outlet gets 1 - split_fraction.
             frac = float(specs["split_fraction"])
-            _try_set(
-                ["SplitRatios"],
-                [frac, 1.0 - frac], "split_fractions",
-            )
-            # Some DWSIM versions use indexed StreamRatio properties
-            for idx, val in enumerate([frac, 1.0 - frac]):
-                _try_set(
-                    [f"StreamRatio({idx})", f"StreamRatios[{idx}]",
-                     f"SplitRatio_{idx}"],
-                    val, f"stream_ratio_{idx}",
-                )
+
+            # DWSIM's NodeOut.Ratios is Dictionary(Of String, Double) keyed by
+            # outlet stream TAG.  Scan the output connectors to find attached tags,
+            # then set per-stream ratios.  This is the only reliable method.
+            ratio_set = False
+            try:
+                out_tags = []
+                for conn in obj.GraphicObject.OutputConnectors:
+                    try:
+                        if conn.IsAttached:
+                            attached_go = conn.AttachedConnector.AttachedFrom
+                            # Find matching tag in registry
+                            for stag, sobj in _object_registry.items():
+                                try:
+                                    if sobj.GraphicObject is attached_go:
+                                        out_tags.append(stag)
+                                        break
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+
+                if len(out_tags) >= 2:
+                    ratios = {out_tags[0]: frac, out_tags[1]: 1.0 - frac}
+                    for stag, ratio in ratios.items():
+                        try:
+                            obj.Ratios[stag] = ratio
+                        except Exception:
+                            pass
+                    applied.append(f"Ratios set per outlet stream: {ratios}")
+                    ratio_set = True
+                elif len(out_tags) == 1:
+                    # Only one outlet connected so far — set what we can
+                    try:
+                        obj.Ratios[out_tags[0]] = frac
+                        applied.append(f"Ratio set for single outlet {out_tags[0]}: {frac}")
+                    except Exception:
+                        pass
+            except Exception as e:
+                skipped.append(f"outlet-connector scan failed: {e}")
+
+            if not ratio_set:
+                # Fallback: try simple attribute-based approaches
+                _try_set(["SplitRatios"], [frac, 1.0 - frac], "split_fractions_list")
+                for idx, val in enumerate([frac, 1.0 - frac]):
+                    _try_set(
+                        [f"StreamRatio({idx})", f"StreamRatios[{idx}]",
+                         f"SplitRatio_{idx}"],
+                        val, f"stream_ratio_{idx}",
+                    )
 
     else:
         # Unknown type — record as skipped
