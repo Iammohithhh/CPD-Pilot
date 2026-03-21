@@ -145,20 +145,28 @@ print("Peng-Robinson property package added")
 # 4.  Object-type helper
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _ot(name):
+    """Resolve ObjectType by name, trying OT_ prefix if bare name fails."""
+    for candidate in (name, f"OT_{name}"):
+        val = getattr(ObjectType, candidate, None)
+        if val is not None:
+            return val
+    raise AttributeError(f"ObjectType has no attribute '{name}' or 'OT_{name}'")
+
 OBJ_MAP = {
-    "MaterialStream":    ObjectType.MaterialStream,
-    "EnergyStream":      ObjectType.EnergyStream,
-    "Mixer":             ObjectType.NodeIn,
-    "Splitter":          ObjectType.NodeOut,
-    "Heater":            ObjectType.Heater,
-    "Cooler":            ObjectType.Cooler,
-    "Pump":              ObjectType.Pump,
-    "Compressor":        ObjectType.Compressor,
-    "Valve":             ObjectType.Valve,
-    "Flash":             ObjectType.Vessel,
-    "ConversionReactor": ObjectType.RCT_Conversion,
-    "ShortcutColumn":    ObjectType.ShortcutColumn,
-    "Recycle":           ObjectType.Recycle,
+    "MaterialStream":    _ot("MaterialStream"),
+    "EnergyStream":      _ot("EnergyStream"),
+    "Mixer":             _ot("NodeIn"),
+    "Splitter":          _ot("NodeOut"),
+    "Heater":            _ot("Heater"),
+    "Cooler":            _ot("Cooler"),
+    "Pump":              _ot("Pump"),
+    "Compressor":        _ot("Compressor"),
+    "Valve":             _ot("Valve"),
+    "Flash":             _ot("Vessel"),
+    "ConversionReactor": _ot("RCT_Conversion"),
+    "ShortcutColumn":    _ot("ShortcutColumn"),
+    "Recycle":           _ot("Recycle"),
 }
 
 registry = {}   # tag -> DWSIM object
