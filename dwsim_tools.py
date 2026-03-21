@@ -246,38 +246,49 @@ def _load_dwsim() -> bool:
 
 # Map the string names used in process_library.py to DWSIM ObjectType enum values.
 # Evaluated lazily after DLLs are loaded.
+def _ot(attr: str):
+    """Return ObjectType.attr, falling back to ObjectType.OT_attr if needed."""
+    val = getattr(ObjectType, attr, None)
+    if val is not None:
+        return val
+    val = getattr(ObjectType, f"OT_{attr}", None)
+    if val is not None:
+        return val
+    raise AttributeError(f"ObjectType has no attribute '{attr}' or 'OT_{attr}'")
+
+
 def _obj_type(name: str):
     """Resolve a unit-op type name string to an ObjectType enum member."""
     if ObjectType is None:
         raise RuntimeError("DWSIM not loaded")
 
     _MAP = {
-        "MaterialStream": ObjectType.MaterialStream,
-        "EnergyStream": ObjectType.EnergyStream,
-        "Mixer": ObjectType.NodeIn,         # legacy name for Mixer
-        "Splitter": ObjectType.NodeOut,     # legacy name for Splitter
-        "Heater": ObjectType.Heater,
-        "Cooler": ObjectType.Cooler,
-        "HeatExchanger": ObjectType.HeatExchanger,
-        "Valve": ObjectType.Valve,
-        "Pump": ObjectType.Pump,
-        "Compressor": ObjectType.Compressor,
-        "Expander": ObjectType.Expander,
-        "Pipe": ObjectType.Pipe,
-        "Flash": ObjectType.Vessel,         # Flash separator = Vessel
-        "Vessel": ObjectType.Vessel,
-        "Tank": ObjectType.Tank,
-        "Filter": ObjectType.Filter,
-        "ShortcutColumn": ObjectType.ShortcutColumn,
-        "DistillationColumn": ObjectType.DistillationColumn,
-        "AbsorptionColumn": ObjectType.AbsorptionColumn,
-        "ConversionReactor": ObjectType.RCT_Conversion,
-        "EquilibriumReactor": ObjectType.RCT_Equilibrium,
-        "GibbsReactor": ObjectType.RCT_Gibbs,
-        "CSTR": ObjectType.RCT_CSTR,
-        "PFR": ObjectType.RCT_PFR,
-        "ComponentSeparator": ObjectType.ComponentSeparator,
-        "Recycle":  ObjectType.Recycle,
+        "MaterialStream":    _ot("MaterialStream"),
+        "EnergyStream":      _ot("EnergyStream"),
+        "Mixer":             _ot("NodeIn"),
+        "Splitter":          _ot("NodeOut"),
+        "Heater":            _ot("Heater"),
+        "Cooler":            _ot("Cooler"),
+        "HeatExchanger":     _ot("HeatExchanger"),
+        "Valve":             _ot("Valve"),
+        "Pump":              _ot("Pump"),
+        "Compressor":        _ot("Compressor"),
+        "Expander":          _ot("Expander"),
+        "Pipe":              _ot("Pipe"),
+        "Flash":             _ot("Vessel"),
+        "Vessel":            _ot("Vessel"),
+        "Tank":              _ot("Tank"),
+        "Filter":            _ot("Filter"),
+        "ShortcutColumn":    _ot("ShortcutColumn"),
+        "DistillationColumn":_ot("DistillationColumn"),
+        "AbsorptionColumn":  _ot("AbsorptionColumn"),
+        "ConversionReactor": _ot("RCT_Conversion"),
+        "EquilibriumReactor":_ot("RCT_Equilibrium"),
+        "GibbsReactor":      _ot("RCT_Gibbs"),
+        "CSTR":              _ot("RCT_CSTR"),
+        "PFR":               _ot("RCT_PFR"),
+        "ComponentSeparator":_ot("ComponentSeparator"),
+        "Recycle":           _ot("Recycle"),
     }
     if name not in _MAP:
         raise ValueError(f"Unknown unit operation type: '{name}'. "
