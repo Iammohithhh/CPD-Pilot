@@ -20,7 +20,7 @@ from typing import Any
 try:
     import openpyxl
     from openpyxl.styles import (
-        Font, PatternFill, Alignment, Border, Side, numbers
+        Font, PatternFill, Alignment, Border, Side,
     )
     from openpyxl.utils import get_column_letter
     _OPENPYXL_OK = True
@@ -110,9 +110,9 @@ def _write_stream_summary(ws, stream_results: dict, compounds: list[str]) -> Non
             _label_cell(ws, r, 2, "error", alt)
             continue
 
-        t_c = data.get("T_C", (data.get("T_K", 273.15) - 273.15))
-        p_bar = data.get("P_bar", data.get("P_Pa", 1e5) / 1e5)
-        flow_kg_hr = data.get("mass_flow_kg_hr", data.get("mass_flow_kg_s", 0) * 3600)
+        t_c = data.get("T_C", (data["T_K"] - 273.15) if "T_K" in data else "")
+        p_bar = data.get("P_bar", (data["P_Pa"] / 1e5) if "P_Pa" in data else "")
+        flow_kg_hr = data.get("mass_flow_kg_hr", (data["mass_flow_kg_s"] * 3600) if "mass_flow_kg_s" in data else "")
         flow_mol_s = data.get("molar_flow_mol_s", "")
         phase = data.get("phase", "")
 
@@ -150,16 +150,16 @@ def _write_mass_balance(ws, stream_results: dict, compounds: list[str]) -> None:
     _label_cell(ws, 2, 1, "T (°C)", False, bold=True)
     for c, tag in enumerate(tags, 2):
         data = stream_results.get(tag, {})
-        t_c = data.get("T_C", (data.get("T_K", 273.15) - 273.15))
-        _data_cell(ws, 2, c, round(t_c, 1) if isinstance(t_c, float) else t_c,
+        t_c = data.get("T_C", (data["T_K"] - 273.15) if "T_K" in data else "")
+        _data_cell(ws, 2, c, round(t_c, 1) if isinstance(t_c, (int, float)) else t_c,
                    False, "#,##0.0")
 
     # Row 3: P row
     _label_cell(ws, 3, 1, "P (bar)", False, bold=True)
     for c, tag in enumerate(tags, 2):
         data = stream_results.get(tag, {})
-        p_bar = data.get("P_bar", data.get("P_Pa", 1e5) / 1e5)
-        _data_cell(ws, 3, c, round(p_bar, 3) if isinstance(p_bar, float) else p_bar,
+        p_bar = data.get("P_bar", (data["P_Pa"] / 1e5) if "P_Pa" in data else "")
+        _data_cell(ws, 3, c, round(p_bar, 3) if isinstance(p_bar, (int, float)) else p_bar,
                    False, "#,##0.000")
 
     # Row 4: Total flow row
@@ -167,10 +167,10 @@ def _write_mass_balance(ws, stream_results: dict, compounds: list[str]) -> None:
     grand_total = 0.0
     for c, tag in enumerate(tags, 2):
         data = stream_results.get(tag, {})
-        flow = data.get("mass_flow_kg_hr", data.get("mass_flow_kg_s", 0) * 3600)
+        flow = data.get("mass_flow_kg_hr", (data["mass_flow_kg_s"] * 3600) if "mass_flow_kg_s" in data else "")
         if isinstance(flow, (int, float)):
             grand_total += flow
-        _data_cell(ws, 4, c, round(flow, 2) if isinstance(flow, float) else flow,
+        _data_cell(ws, 4, c, round(flow, 2) if isinstance(flow, (int, float)) else flow,
                    False, "#,##0.00", bold=True)
     _data_cell(ws, 4, len(tags) + 2, round(grand_total, 2), False, "#,##0.00", bold=True)
 
@@ -180,7 +180,6 @@ def _write_mass_balance(ws, stream_results: dict, compounds: list[str]) -> None:
     )
 
     # Rows 6+: one row per compound
-    compound_totals = [0.0] * len(compounds)
     for ri, compound in enumerate(compounds):
         row = ri + 6
         alt = (ri % 2 == 0)
@@ -189,12 +188,11 @@ def _write_mass_balance(ws, stream_results: dict, compounds: list[str]) -> None:
         row_total = 0.0
         for c, tag in enumerate(tags, 2):
             data = stream_results.get(tag, {})
-            flow = data.get("mass_flow_kg_hr", data.get("mass_flow_kg_s", 0) * 3600)
+            flow = data.get("mass_flow_kg_hr", (data["mass_flow_kg_s"] * 3600) if "mass_flow_kg_s" in data else 0)
             fracs = data.get("mass_fractions", [])
             if isinstance(flow, (int, float)) and ri < len(fracs):
                 comp_flow = flow * fracs[ri]
                 row_total += comp_flow
-                compound_totals[ri] += comp_flow
                 _data_cell(ws, row, c, round(comp_flow, 3), alt, "#,##0.000")
             else:
                 _data_cell(ws, row, c, "", alt)
@@ -257,26 +255,28 @@ def _write_energy_balance(ws, unit_op_results: dict,
     total_cool = 0.0
     total_work = 0.0
 
-    for r, (tag, data) in enumerate(unit_op_results.items(), 2):
+    written_row = 1  # last written row (header is row 1)
+    for tag, data in unit_op_results.items():
         if not isinstance(data, dict) or "error" in data:
             continue
-        alt = (r % 2 == 0)
+        written_row += 1
+        alt = (written_row % 2 == 0)
         eq_type = type_map.get(tag, "")
         duty = data.get("duty_kW")
         delta_p = data.get("delta_P_Pa")
         outlet_t = data.get("outlet_T_K")
         purpose = purpose_map.get(tag, "")
 
-        _label_cell(ws, r, 1, tag, alt, bold=True)
-        _label_cell(ws, r, 2, eq_type, alt)
-        _data_cell(ws, r, 3, round(duty, 3) if duty is not None else "",
+        _label_cell(ws, written_row, 1, tag, alt, bold=True)
+        _label_cell(ws, written_row, 2, eq_type, alt)
+        _data_cell(ws, written_row, 3, round(duty, 3) if duty is not None else "",
                    alt, "#,##0.000")
-        _data_cell(ws, r, 4, round(delta_p / 1e5, 4) if delta_p is not None else "",
+        _data_cell(ws, written_row, 4, round(delta_p / 1e5, 4) if delta_p is not None else "",
                    alt, "#,##0.0000")
-        _data_cell(ws, r, 5,
+        _data_cell(ws, written_row, 5,
                    round(outlet_t - 273.15, 1) if outlet_t is not None else "",
                    alt, "#,##0.0")
-        _label_cell(ws, r, 6, purpose, alt)
+        _label_cell(ws, written_row, 6, purpose, alt)
 
         if duty is not None:
             if eq_type in ("Cooler",) or (duty < 0 and eq_type not in ("Pump", "Compressor")):
@@ -290,7 +290,7 @@ def _write_energy_balance(ws, unit_op_results: dict,
                 total_cool += abs(duty) if duty < 0 else 0
 
     # Summary block
-    summary_row = len(unit_op_results) + 4
+    summary_row = written_row + 2
     ws.cell(row=summary_row, column=1, value="ENERGY SUMMARY").font = Font(
         bold=True, name="Calibri", size=10
     )

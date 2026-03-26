@@ -1316,7 +1316,7 @@ def configure_reactions(
         rxn_summary = "\n".join(
             f"  • {r.get('equation', 'unknown')}  "
             f"(T={r.get('temperature_C', '?')}°C, "
-            f"conv={int(r.get('conversion', 0)*100)}%)"
+            f"conv={int((r.get('conversion') or 0) * 100)}%)"
             for r in reactions
         )
         question = (

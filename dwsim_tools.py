@@ -881,6 +881,12 @@ def modify_dwsim_file(
 
     Returns a summary of what was found, what was added, and where it was saved.
     """
+    if not os.path.isfile(file_path):
+        return {
+            "success": False,
+            "error": f"File not found: {file_path}",
+        }
+
     steps: list[dict] = []
 
     # ── Load ────────────────────────────────────────────────────────────────
@@ -989,6 +995,8 @@ def build_flowsheet_no_sim(
     unit_ops = process_data.get("unit_operations", [])
     r = add_all_unit_operations(unit_ops)
     steps.append({"step": "add_unit_operations", **r})
+    if r.get("added", 0) == 0 and unit_ops:
+        return {"success": False, "error": "All unit operations failed to add.", "steps": steps}
 
     # ── 4. Add streams ───────────────────────────────────────────────────────
     streams = process_data.get("streams", [])
