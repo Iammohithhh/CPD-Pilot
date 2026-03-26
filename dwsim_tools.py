@@ -810,6 +810,174 @@ def load_flowsheet(file_path: str) -> dict:
         return {"success": False, "error": str(exc)}
 
 
+def list_existing_objects() -> dict:
+    """
+    Enumerate all objects in the currently active flowsheet and repopulate
+    the internal object registry.
+
+    Call this after load_flowsheet() to discover what unit operations and
+    streams already exist before adding new ones.
+
+    Returns a list of objects with their tags and types.
+    """
+    global _object_registry
+
+    if _sim is None:
+        return {"success": False, "error": "No flowsheet active."}
+
+    objects: list[dict] = []
+    try:
+        for kvp in _sim.SimulationObjects:
+            try:
+                tag = str(kvp.Key)
+                obj = kvp.Value
+                _object_registry[tag] = obj  # re-register for subsequent ops
+
+                entry: dict = {"tag": tag}
+                try:
+                    entry["type"] = str(obj.GraphicObject.ObjectType)
+                except Exception:
+                    pass
+                try:
+                    entry["x"] = int(obj.GraphicObject.X)
+                    entry["y"] = int(obj.GraphicObject.Y)
+                except Exception:
+                    pass
+                objects.append(entry)
+            except Exception as inner_exc:
+                objects.append({"error": str(inner_exc)})
+
+        return {
+            "success": True,
+            "count": len(objects),
+            "objects": objects,
+            "tags": [o["tag"] for o in objects if "tag" in o],
+        }
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+        }
+
+
+def build_flowsheet_no_sim(
+    process_data: dict,
+    output_dir: str | None = None,
+) -> dict:
+    """
+    Build a DWSIM flowsheet topology from process data WITHOUT running the
+    simulation solver.
+
+    Suitable for the PFD-upload workflow where the student wants a pre-wired
+    .dwxmz file that they open in the DWSIM GUI, set stream conditions
+    themselves, and then press Solve.
+
+    Steps performed:
+      1. Initialise DWSIM
+      2. Create flowsheet (compounds + thermo model)
+      3. Add all unit operations
+      4. Add feed / intermediate streams
+      5. Wire all connections
+      6. Save to .dwxmz
+
+    No simulation is run — convergence issues cannot occur here.
+
+    Args:
+        process_data: process_library-compatible dict.  Must contain at
+                      minimum: compounds, thermo_model, unit_operations,
+                      streams, connections.
+        output_dir:   directory for the saved file (default: outputs/).
+
+    Returns a result dict with file_path and a text topology_summary that
+    Claude should show the student for confirmation before saving.
+    """
+    steps: list[dict] = []
+
+    # ── 1. Initialise ───────────────────────────────────────────────────────
+    r = initialize_dwsim()
+    steps.append({"step": "initialise_dwsim", **r})
+    if not r["success"]:
+        return {"success": False, "steps": steps}
+
+    # ── 2. Create flowsheet ─────────────────────────────────────────────────
+    compounds = process_data.get("compounds", [])
+    thermo_model = process_data.get("thermo_model", "Peng-Robinson")
+    r = create_flowsheet(compounds=compounds, thermo_model=thermo_model)
+    steps.append({"step": "create_flowsheet", **r})
+    if not r["success"]:
+        return {"success": False, "steps": steps}
+
+    # ── 3. Add unit operations ───────────────────────────────────────────────
+    unit_ops = process_data.get("unit_operations", [])
+    r = add_all_unit_operations(unit_ops)
+    steps.append({"step": "add_unit_operations", **r})
+
+    # ── 4. Add streams ───────────────────────────────────────────────────────
+    streams = process_data.get("streams", [])
+    r = add_material_streams(streams)
+    steps.append({"step": "add_streams", **r})
+
+    # ── 5. Wire connections ──────────────────────────────────────────────────
+    connections = process_data.get("connections", [])
+    r = connect_all(connections)
+    steps.append({"step": "connect_objects", **r})
+
+    # ── 6. Save (no simulation) ──────────────────────────────────────────────
+    out_dir = output_dir or os.path.join(os.path.dirname(__file__), "outputs")
+    chem_name = (
+        process_data.get("chemical", "process")
+        .replace(" ", "_")
+        .replace("/", "_")
+    )
+    save_path = os.path.join(out_dir, f"{chem_name}_topology.dwxmz")
+    r = save_flowsheet(save_path)
+    steps.append({"step": "save_flowsheet", **r})
+
+    # ── Build human-readable topology summary ────────────────────────────────
+    unit_summary = [
+        {
+            "tag": u.get("name", ""),
+            "type": u.get("type", ""),
+            "purpose": u.get("purpose", ""),
+        }
+        for u in unit_ops
+    ]
+    stream_summary = [
+        {"tag": s.get("name", ""), "type": s.get("type", "material")}
+        for s in streams
+    ]
+    conn_lines = [
+        f"  {c[0]} → {c[1]}" if len(c) >= 2 else str(c)
+        for c in connections
+    ]
+    topology_text = (
+        f"Compounds : {', '.join(compounds)}\n"
+        f"Thermo    : {thermo_model}\n"
+        f"Units     : {len(unit_ops)}\n"
+        + "\n".join(f"  [{u['type']}] {u['tag']}  — {u['purpose']}" for u in unit_summary)
+        + f"\nStreams   : {len(stream_summary)}\n"
+        + "\n".join(f"  {s['tag']} ({s['type']})" for s in stream_summary)
+        + f"\nConnections:\n"
+        + "\n".join(conn_lines)
+    )
+
+    return {
+        "success": r.get("success", False),
+        "file_path": save_path if r.get("success") else None,
+        "topology_summary": topology_text,
+        "unit_operations": unit_summary,
+        "streams": stream_summary,
+        "connections": connections,
+        "steps": steps,
+        "next_steps": (
+            "Topology saved. Open the .dwxmz file in the DWSIM GUI. "
+            "Set stream conditions (T, P, flow, composition) as needed, "
+            "then press Solve to run the simulation."
+        ),
+    }
+
+
 def add_energy_stream_to_unit_op(unit_op_tag: str, energy_tag: str | None = None) -> dict:
     """
     Create an EnergyStream and connect it to the energy port of a unit operation.

@@ -66,14 +66,28 @@ mcp = FastMCP(
     "CPD-Pilot",
     instructions=(
         "You are a Chemical Process Design assistant. "
-        "When a user requests a process, follow this workflow:\n"
-        "1. Parse their input with parse_process_request (handles natural language + flow rates)\n"
-        "2. If a PFD image is provided, extract it with extract_pfd_from_image\n"
-        "3. Look up the process in the library, or search the web if not found\n"
-        "4. Generate a PFD diagram for the student\n"
-        "5. Build and run the DWSIM simulation\n"
-        "6. Generate mass balance and energy balance reports\n"
-        "7. Present a comprehensive report with engineering tables"
+        "Three main workflows are available:\n\n"
+        "WORKFLOW A — Design from scratch:\n"
+        "1. Parse input with parse_process_request\n"
+        "2. Look up process in library or search web\n"
+        "3. Generate PFD diagram\n"
+        "4. Build and run DWSIM simulation\n"
+        "5. Generate mass/energy balance reports\n\n"
+        "WORKFLOW B — PFD image → DWSIM file (no simulation):\n"
+        "1. Call extract_pfd_from_image with the uploaded image path\n"
+        "2. Read the image and fill the extraction template\n"
+        "3. Call validate_pfd_data to clean the data\n"
+        "4. Show topology summary to student and ask for confirmation\n"
+        "5. Call build_dwsim_from_pfd to create the .dwxmz file\n"
+        "6. Return the file path — student opens in DWSIM GUI and presses Solve\n\n"
+        "WORKFLOW C — Modify an existing .dwxmz file:\n"
+        "1. Call load_dwsim_file with the uploaded file path\n"
+        "2. Inspect existing objects with list_flowsheet_objects\n"
+        "3. Add new unit ops with add_unit_operation\n"
+        "4. Wire with connect_objects\n"
+        "5. Save with save_flowsheet\n\n"
+        "Use the prompt templates 'Design Chemical Process', 'PFD to DWSIM File', "
+        "and 'Compare Two Processes' as starting points."
     ),
 )
 
@@ -883,6 +897,93 @@ def build_process_from_library(
 
 
 @mcp.tool()
+def load_dwsim_file(
+    file_path: Annotated[str, Field(
+        description=(
+            "Absolute path to the .dwxmz or .dwxml file the student wants to modify. "
+            "Example: '/home/user/my_process.dwxmz'"
+        )
+    )],
+) -> dict:
+    """
+    Load an existing DWSIM flowsheet file and list every object inside it.
+
+    Use this as the first step when a student uploads their own .dwxmz file
+    and asks Claude to add or modify unit operations inside it.
+
+    Returns:
+    - loaded_from: path of the file loaded
+    - count: number of objects found
+    - objects: list of {tag, type, x, y} for every unit op and stream
+    - tags: flat list of all tags (for quick reference)
+
+    After this call the flowsheet is active — you can immediately call
+    add_unit_operation, connect_objects, configure_unit_operation, and
+    save_flowsheet to modify it.
+    """
+    r_load = _dwsim.load_flowsheet(file_path)
+    if not r_load.get("success"):
+        return r_load
+    r_list = _dwsim.list_existing_objects()
+    return {**r_load, **r_list}
+
+
+@mcp.tool()
+def list_flowsheet_objects() -> dict:
+    """
+    List all objects in the currently active DWSIM flowsheet.
+
+    Re-enumerates the flowsheet and refreshes the internal object registry.
+    Useful after load_dwsim_file or after manually adding objects to confirm
+    what is present before making further changes.
+
+    Returns count, objects list ({tag, type, x, y}), and flat tags list.
+    """
+    return _dwsim.list_existing_objects()
+
+
+@mcp.tool()
+def build_dwsim_from_pfd(
+    process_data: Annotated[dict, Field(
+        description=(
+            "Process data dict from validate_pfd_data or build_custom_process. "
+            "Must contain: compounds, thermo_model, unit_operations, streams, connections."
+        )
+    )],
+    output_dir: Annotated[str | None, Field(
+        description=(
+            "Directory where the .dwxmz file will be saved. "
+            "Defaults to the 'outputs/' folder in the project directory."
+        )
+    )] = None,
+) -> dict:
+    """
+    Build a DWSIM flowsheet topology from extracted PFD data — WITHOUT running simulation.
+
+    This is the core PFD-upload workflow:
+    1. Student uploads a hand-drawn or digital PFD image
+    2. Claude extracts topology with extract_pfd_from_image + validate_pfd_data
+    3. Claude confirms the understood topology with the student
+    4. This tool builds the .dwxmz file with all units placed and connected
+    5. Student opens the file in DWSIM GUI, sets stream conditions, presses Solve
+
+    No simulation is run — so convergence problems cannot block the student.
+    The file is ready for the student to configure and solve themselves.
+
+    Returns:
+    - success: whether the file was built and saved
+    - file_path: absolute path of the saved .dwxmz
+    - topology_summary: human-readable text summary of what was built
+    - unit_operations, streams, connections: structured topology data
+    - next_steps: instructions for the student
+    """
+    default_output = output_dir or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "outputs"
+    )
+    return _dwsim.build_flowsheet_no_sim(process_data, default_output)
+
+
+@mcp.tool()
 def add_energy_stream_to_unit_op(
     unit_op_tag: Annotated[str, Field(
         description=(
@@ -1061,6 +1162,45 @@ Please follow these steps:
    - Suggest one process improvement a student could investigate.
 
 Target production rate: {production_rate_kg_hr} kg/hr of {chemical}.
+"""
+
+
+@mcp.prompt(title="PFD to DWSIM File")
+def pfd_to_dwsim_prompt(image_path: str, chemical_name: str = "") -> str:
+    """Generate a structured prompt to guide Claude through the PFD-upload → DWSIM file workflow."""
+    chem_hint = f" for {chemical_name}" if chemical_name else ""
+    return f"""Convert this PFD image into a ready-to-open DWSIM flowsheet file{chem_hint}.
+
+Image path: {image_path}
+
+Please follow these steps exactly:
+
+1. **Extract the PFD topology**
+   Call `extract_pfd_from_image("{image_path}"{f', "{chemical_name}"' if chemical_name else ''})` to get the extraction prompt and template.
+   Then read the image and fill in the template with every unit operation, stream, and connection you can identify.
+
+2. **Validate the extracted data**
+   Call `validate_pfd_data(extracted_data{f', "{chemical_name}"' if chemical_name else ''})` to clean and normalise the data.
+
+3. **Confirm the topology with the student**
+   Show a clear text summary of what you understood:
+   - List every unit operation (tag, type, purpose)
+   - List every stream (tag, from → to)
+   - List every connection
+   Ask: "Does this match your PFD? Should I correct anything before building the DWSIM file?"
+
+4. **Build the DWSIM file** (only after student confirms)
+   Call `build_dwsim_from_pfd(process_data)` to create the .dwxmz file with all units placed and connected.
+   Do NOT run the simulation — the student will set stream conditions and solve it themselves.
+
+5. **Hand off to the student**
+   Report the saved file path and give clear instructions:
+   - Open the .dwxmz in DWSIM
+   - Set T, P, flow, and composition on each feed stream
+   - Add any reactions in the Reactions Manager if needed
+   - Press Solve (F5)
+
+Image to process: {image_path}
 """
 
 
