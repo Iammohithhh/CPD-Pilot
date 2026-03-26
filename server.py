@@ -87,8 +87,14 @@ mcp = FastMCP(
         "3. Add new unit ops with add_unit_operation\n"
         "4. Wire with connect_objects\n"
         "5. Save with save_flowsheet\n\n"
-        "Use the prompt templates 'Design Chemical Process', 'PFD to DWSIM File', "
-        "and 'Compare Two Processes' as starting points."
+        "REACTION SETUP — always ask the student first:\n"
+        "1. Call configure_reactions(process_data, mode='ask') and show question_for_student\n"
+        "2. If student says 'auto': call configure_reactions(process_data, mode='auto')\n"
+        "   — auto falls back to manual instructions automatically if it fails\n"
+        "3. If student says 'manual': call configure_reactions(process_data, mode='manual')\n"
+        "   and display the step-by-step GUI instructions\n\n"
+        "Use prompt templates: 'Design Chemical Process', 'Configure Reactions', "
+        "'PFD to DWSIM File', 'Compare Two Processes'."
     ),
 )
 
@@ -1239,6 +1245,119 @@ def configure_multiple_unit_ops(
 
 
 @mcp.tool()
+def get_manual_reaction_instructions(
+    process_data: Annotated[dict, Field(
+        description=(
+            "Process data dict (from library, build_custom_process, or validate_pfd_data). "
+            "Must have 'reactions' and 'unit_operations' keys."
+        )
+    )],
+) -> dict:
+    """
+    Generate step-by-step GUI instructions for the student to add reactions manually in DWSIM.
+
+    Use this when:
+    - The student says they want to add reactions themselves
+    - Automatic reaction setup failed
+    - The process has complex kinetics (Arrhenius, multi-step) that auto-setup handles poorly
+
+    Returns a clear numbered guide: open Reactions Manager → add each reaction →
+    create Reaction Set → assign to reactor → press Solve.
+
+    The instructions are always correct regardless of DWSIM version or reaction complexity.
+    """
+    return _dwsim.get_manual_reaction_instructions(process_data)
+
+
+@mcp.tool()
+def configure_reactions(
+    process_data: Annotated[dict, Field(
+        description=(
+            "Process data dict with 'reactions' and 'unit_operations' keys. "
+            "From library lookup, build_custom_process, or validate_pfd_data."
+        )
+    )],
+    mode: Annotated[str, Field(
+        description=(
+            "How to handle reaction setup:\n"
+            "  'auto'   — Claude tries setup_reactions() automatically. "
+            "             Falls back to manual instructions if it fails.\n"
+            "  'manual' — Skip auto setup; return GUI instructions immediately.\n"
+            "  'ask'    — Return the question to ask the student, plus both options."
+        )
+    )] = "ask",
+) -> dict:
+    """
+    Flexible reaction configuration with student-choice UX.
+
+    This is the recommended tool for ALL reaction setup. It supports three modes:
+
+    'ask' (default):
+      Returns a formatted question to show the student and structured data for
+      both options. Claude should display this question, wait for the student's
+      answer, then call configure_reactions again with mode='auto' or mode='manual'.
+
+    'auto':
+      Tries automatic reaction setup via setup_reactions(). If it succeeds, done.
+      If it fails, automatically falls back and returns manual instructions so the
+      student is never left stuck.
+
+    'manual':
+      Skips auto setup entirely and returns the step-by-step GUI guide.
+      Use when the student says they prefer to configure reactions themselves,
+      or when dealing with complex kinetics (Arrhenius, multi-step, catalytic).
+
+    Returns differ by mode — always includes manual_instructions so the student
+    can fall back at any point.
+    """
+    if mode == "ask":
+        reactions = process_data.get("reactions", [])
+        manual = _dwsim.get_manual_reaction_instructions(process_data)
+        rxn_summary = "\n".join(
+            f"  • {r.get('equation', 'unknown')}  "
+            f"(T={r.get('temperature_C', '?')}°C, "
+            f"conv={int(r.get('conversion', 0)*100)}%)"
+            for r in reactions
+        )
+        question = (
+            f"This process has {len(reactions)} reaction(s):\n{rxn_summary}\n\n"
+            "How would you like to handle reaction setup?\n\n"
+            "**Option A — Claude does it automatically**\n"
+            "  I'll try to configure the reactions programmatically. "
+            "Works well for simple stoichiometric reactions. "
+            "If it fails, I'll give you the manual steps instead.\n\n"
+            "**Option B — You add the reactions yourself in DWSIM**\n"
+            "  I'll give you step-by-step instructions. "
+            "Takes about 30 seconds in the GUI and always works.\n\n"
+            "Which do you prefer? (Reply 'auto' or 'manual')"
+        )
+        return {
+            "mode": "ask",
+            "question_for_student": question,
+            "reactions": reactions,
+            "reactor_tags": manual["reactor_tags"],
+            "manual_instructions": manual["instructions"],
+            "next_step": "Call configure_reactions again with mode='auto' or mode='manual' based on student reply.",
+        }
+
+    if mode == "manual":
+        result = _dwsim.get_manual_reaction_instructions(process_data)
+        result["mode"] = "manual"
+        result["message"] = (
+            "Here are the step-by-step instructions to add reactions in the DWSIM GUI."
+        )
+        return result
+
+    if mode == "auto":
+        return _dwsim.configure_reactions_with_fallback(process_data)
+
+    return {
+        "error": f"Unknown mode '{mode}'. Use 'ask', 'auto', or 'manual'.",
+        "valid_modes": ["ask", "auto", "manual"],
+    }
+
+
+@mcp.tool()
 def setup_reactions(
     chemical: Annotated[str, Field(
         description=(
@@ -1319,6 +1438,45 @@ Please follow these steps:
    - Suggest one process improvement a student could investigate.
 
 Target production rate: {production_rate_kg_hr} kg/hr of {chemical}.
+"""
+
+
+@mcp.prompt(title="Configure Reactions")
+def configure_reactions_prompt(chemical: str = "") -> str:
+    """Guide Claude through the reaction setup decision workflow."""
+    chem_hint = f" for {chemical}" if chemical else ""
+    lookup_hint = (
+        f'Call `lookup_chemical_process("{chemical}")` to get the reaction definitions.'
+        if chemical
+        else "Use the process_data dict already available from the previous step."
+    )
+    return f"""Set up reactions{chem_hint} in the DWSIM simulation.
+
+Follow this workflow:
+
+1. **Get process data**
+   {lookup_hint}
+
+2. **Ask the student** (always do this first)
+   Call `configure_reactions(process_data, mode="ask")` and show the returned
+   `question_for_student` to the student verbatim.
+   Wait for their reply before proceeding.
+
+3a. **If student chooses 'auto':**
+    Call `configure_reactions(process_data, mode="auto")`.
+    - If `mode` in result is `"auto"` and `success` is True → reactions are set up.
+      Tell the student "Reactions configured. Run the simulation now."
+    - If `mode` is `"manual_fallback"` → auto failed.
+      Show the `manual_instructions` from the result and explain what happened.
+
+3b. **If student chooses 'manual':**
+    Call `configure_reactions(process_data, mode="manual")`.
+    Display the `instructions` field to the student.
+    Tell them: "Follow these steps in the DWSIM GUI, then come back and press Solve."
+
+4. **After reactions are configured:**
+   Call `run_simulation()` and report results.
+   If the reactor stays red (unsolved), offer to show manual instructions again.
 """
 
 

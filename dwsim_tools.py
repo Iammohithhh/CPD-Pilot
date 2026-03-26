@@ -1672,6 +1672,166 @@ def setup_reactions(process_data: dict) -> dict:
         }
 
 
+def get_manual_reaction_instructions(process_data: dict) -> dict:
+    """
+    Generate step-by-step manual instructions for adding reactions in the DWSIM GUI.
+
+    Returns plain text instructions the student can follow in ~30 seconds.
+    Always works regardless of DWSIM version or reaction complexity.
+
+    Args:
+        process_data: process_library-compatible dict with 'reactions' and
+                      'unit_operations' keys.
+
+    Returns dict with 'instructions' (string) and structured 'reactions' list.
+    """
+    reactions = process_data.get("reactions", [])
+    unit_ops = process_data.get("unit_operations", [])
+
+    _reactor_types = {
+        "ConversionReactor", "EquilibriumReactor", "GibbsReactor", "CSTR", "PFR",
+    }
+    reactor_tags = [op["name"] for op in unit_ops if op.get("type") in _reactor_types]
+
+    if not reactions:
+        return {
+            "instructions": "No reactions are defined for this process — nothing to add.",
+            "reactions": [],
+            "reactor_tags": reactor_tags,
+        }
+
+    lines: list[str] = []
+    lines.append("═" * 60)
+    lines.append("  MANUAL REACTION SETUP — DWSIM GUI")
+    lines.append("═" * 60)
+    lines.append("")
+    lines.append("Step 1 — Open the Reactions Manager")
+    lines.append("  In DWSIM menu: Data → Reactions")
+    lines.append("  (Or press Ctrl+R in some versions)")
+    lines.append("")
+    lines.append("Step 2 — Add each reaction:")
+    lines.append("")
+
+    for i, rxn in enumerate(reactions, 1):
+        eq = rxn.get("equation", "")
+        rxn_type = rxn.get("type", "ConversionReactor")
+        t_c = rxn.get("temperature_C", "")
+        p_bar = rxn.get("pressure_bar", "")
+        conv = rxn.get("conversion")
+        catalyst = rxn.get("catalyst", "")
+
+        if "Conversion" in rxn_type or rxn_type == "ConversionReactor":
+            gui_type = "Conversion Reaction"
+        elif "Equilibrium" in rxn_type:
+            gui_type = "Equilibrium Reaction"
+        elif "Gibbs" in rxn_type:
+            gui_type = "Gibbs Reaction"
+        elif rxn_type in ("CSTR", "PFR"):
+            gui_type = "Kinetic Reaction"
+        else:
+            gui_type = "Conversion Reaction"
+
+        lines.append(f"  Reaction {i}: {eq}")
+        lines.append(f"    a) Click 'Add Reaction' → choose '{gui_type}'")
+        lines.append(f"    b) Enter equation: {eq}")
+        if conv is not None:
+            lines.append(f"    c) Set conversion to: {conv * 100:.0f}%")
+        if t_c:
+            lines.append(f"    d) Temperature: {t_c} °C")
+        if p_bar:
+            lines.append(f"    e) Pressure: {p_bar} bar")
+        if catalyst:
+            lines.append(f"    f) Note catalyst: {catalyst}")
+        lines.append("")
+
+    lines.append("Step 3 — Create a Reaction Set")
+    lines.append("  In the Reactions Manager: click 'Add Reaction Set'")
+    lines.append("  Tick all the reactions you just created")
+    lines.append("  Name it (e.g. 'RXN-SET-01') → click OK")
+    lines.append("")
+    lines.append("Step 4 — Assign the Reaction Set to the reactor(s)")
+    for rtag in reactor_tags:
+        lines.append(f"  Double-click reactor '{rtag}'")
+        lines.append(f"  → 'Reaction Set' dropdown → select 'RXN-SET-01'")
+        lines.append(f"  → click OK")
+    lines.append("")
+    lines.append("Step 5 — Press Solve (F5) and check results")
+    lines.append("═" * 60)
+
+    return {
+        "instructions": "\n".join(lines),
+        "reactions": reactions,
+        "reactor_tags": reactor_tags,
+        "reaction_count": len(reactions),
+    }
+
+
+def configure_reactions_with_fallback(process_data: dict) -> dict:
+    """
+    Try to set up reactions automatically; if it fails return manual instructions.
+
+    This is the recommended entry point for reaction setup:
+    - Auto mode: calls setup_reactions(), which works well for simple stoichiometric
+      reactions from the process library.
+    - On failure: returns manual step-by-step GUI instructions so the student is
+      never blocked.
+
+    Args:
+        process_data: process_library-compatible dict.
+
+    Returns:
+        {
+          "mode": "auto" | "manual_fallback",
+          "success": bool,
+          "auto_result": {...},          # present if auto was tried
+          "manual_instructions": str,   # always present
+          "reactions": [...],
+          "reactor_tags": [...],
+        }
+    """
+    manual = get_manual_reaction_instructions(process_data)
+
+    if _sim is None:
+        return {
+            "mode": "manual_fallback",
+            "success": False,
+            "reason": "No active flowsheet — cannot run auto setup.",
+            "manual_instructions": manual["instructions"],
+            "reactions": manual["reactions"],
+            "reactor_tags": manual["reactor_tags"],
+        }
+
+    auto_result = setup_reactions(process_data)
+
+    if auto_result.get("success"):
+        return {
+            "mode": "auto",
+            "success": True,
+            "auto_result": auto_result,
+            "manual_instructions": manual["instructions"],
+            "reactions": manual["reactions"],
+            "reactor_tags": manual["reactor_tags"],
+            "message": (
+                "Reactions configured automatically. "
+                "If the reactor stays red after Solve, use the manual instructions below."
+            ),
+        }
+    else:
+        return {
+            "mode": "manual_fallback",
+            "success": False,
+            "auto_result": auto_result,
+            "reason": auto_result.get("error", "Auto setup failed."),
+            "manual_instructions": manual["instructions"],
+            "reactions": manual["reactions"],
+            "reactor_tags": manual["reactor_tags"],
+            "message": (
+                "Automatic reaction setup failed. "
+                "Use the manual instructions below — it takes about 30 seconds in the DWSIM GUI."
+            ),
+        }
+
+
 def build_process_from_library(process_data: dict, output_dir: str | None = None) -> dict:
     """
     High-level function: build and run a complete simulation from a
