@@ -57,6 +57,7 @@ import pfd_parser as _pfd
 import pfd_generator as _pfg
 import input_handler as _inp
 import balance_reporter as _bal
+import excel_exporter as _excel
 
 # ─────────────────────────────────────────────
 # Create MCP server instance
@@ -658,6 +659,103 @@ def generate_full_report_from_data(
 
 
 # ─────────────────────────────────────────────
+# EXCEL EXPORT TOOLS
+# ─────────────────────────────────────────────
+
+@mcp.tool()
+def export_mass_balance_excel(
+    stream_results: Annotated[dict, Field(
+        description=(
+            "Stream results dict from get_stream_results(). "
+            "Keys are stream tags, values have T_K, P_Pa, mass_flow_kg_hr, "
+            "mole_fractions, mass_fractions."
+        )
+    )],
+    compounds: Annotated[list[str], Field(
+        description="Ordered list of compound names matching the simulation."
+    )],
+    output_dir: Annotated[str | None, Field(
+        description="Directory to save the .xlsx file. Default: outputs/"
+    )] = None,
+    filename: Annotated[str, Field(
+        description="Output filename. Default: mass_balance.xlsx"
+    )] = "mass_balance.xlsx",
+) -> dict:
+    """
+    Export stream simulation results to a formatted Excel (.xlsx) workbook.
+
+    Produces three sheets in the standard academic ChE format:
+    - Stream Summary : T (°C), P (bar), total flow (kg/hr) per stream
+    - Mass Balance   : component mass flows (kg/hr) per stream, with row totals
+    - Mole Fractions : mole fractions per compound per stream
+
+    The file can be submitted directly for a CPD assignment. No extra formatting
+    required — headers, borders, and alternating row colours are applied.
+
+    Returns the file path of the saved .xlsx.
+    """
+    return _excel.generate_mass_balance_excel(
+        stream_results=stream_results,
+        compounds=compounds,
+        output_dir=output_dir or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "outputs"
+        ),
+        filename=filename,
+    )
+
+
+@mcp.tool()
+def export_full_balance_excel(
+    stream_results: Annotated[dict, Field(
+        description="Stream results from get_stream_results()."
+    )],
+    unit_op_results: Annotated[dict, Field(
+        description="Unit op results from get_unit_op_results()."
+    )],
+    compounds: Annotated[list[str], Field(
+        description="Ordered list of compound names."
+    )],
+    process_data: Annotated[dict | None, Field(
+        description=(
+            "Optional process data dict (from library or build_custom_process). "
+            "Enables the Process Overview sheet with reactions and unit op table."
+        )
+    )] = None,
+    output_dir: Annotated[str | None, Field(
+        description="Directory to save the .xlsx file. Default: outputs/"
+    )] = None,
+    filename: Annotated[str | None, Field(
+        description="Output filename. Default: <chemical>_full_balance.xlsx"
+    )] = None,
+) -> dict:
+    """
+    Export a complete simulation report to a multi-sheet Excel workbook.
+
+    Sheets included:
+    - Stream Summary   : T, P, total flow per stream
+    - Mass Balance     : component mass flows (kg/hr) with totals
+    - Mole Fractions   : per-compound mole fractions
+    - Energy Balance   : duty (kW), ΔP, outlet T for each unit operation
+                         plus an energy summary block (heating / cooling / work)
+    - Process Overview : compound list, thermo model, reactions, unit op table
+                         (only if process_data is provided)
+
+    Use this after a successful simulation to generate a submission-ready
+    engineering report file.
+    """
+    return _excel.generate_full_balance_excel(
+        stream_results=stream_results,
+        unit_op_results=unit_op_results,
+        compounds=compounds,
+        process_data=process_data,
+        output_dir=output_dir or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "outputs"
+        ),
+        filename=filename,
+    )
+
+
+# ─────────────────────────────────────────────
 # DWSIM SIMULATION TOOLS
 # ─────────────────────────────────────────────
 
@@ -894,6 +992,65 @@ def build_process_from_library(
         os.path.dirname(os.path.abspath(__file__)), "outputs"
     )
     return _dwsim.build_process_from_library(process_data, default_output)
+
+
+@mcp.tool()
+def modify_dwsim_file(
+    file_path: Annotated[str, Field(
+        description=(
+            "Absolute path to the existing .dwxmz or .dwxml file to modify. "
+            "Example: '/home/user/my_process.dwxmz'"
+        )
+    )],
+    add_unit_ops: Annotated[list[dict] | None, Field(
+        description=(
+            "List of unit operations to add. Each dict must have 'type' and 'name'. "
+            "Optional: 'x', 'y' for canvas position. "
+            "Valid types: Mixer, Splitter, Heater, Cooler, HeatExchanger, Valve, "
+            "Pump, Compressor, Flash, DistillationColumn, ConversionReactor, PFR, CSTR, etc."
+            "Example: [{'type': 'DistillationColumn', 'name': 'T-01', 'x': 300, 'y': 100}]"
+        )
+    )] = None,
+    add_connections: Annotated[list[list[str]] | None, Field(
+        description=(
+            "List of [from_tag, to_tag] pairs to wire. Tags must exist in the file "
+            "(existing or newly added). "
+            "Example: [['S-FEED', 'T-01'], ['T-01', 'S-DIST']]"
+        )
+    )] = None,
+    output_path: Annotated[str | None, Field(
+        description=(
+            "Where to save the modified file. Omit to overwrite the original. "
+            "Use a new path to keep the original intact."
+        )
+    )] = None,
+) -> dict:
+    """
+    Load an existing DWSIM flowsheet, add unit operations and/or connections, and save.
+
+    This is the DWSIM file modification workflow:
+    1. Student uploads their existing .dwxmz file
+    2. Call this tool with the file path and what to add
+    3. The tool loads the file, lists what's already there, adds the requested
+       units and connections, then saves the result
+    4. Student opens the updated file in DWSIM GUI
+
+    Scope: adds unit ops and connections only. Does not modify existing objects.
+    For complex changes (reconfigure existing unit ops), use load_dwsim_file +
+    configure_unit_operation + save_flowsheet separately.
+
+    Returns:
+    - existing_objects: tags already present before modification
+    - unit_ops_added: tags successfully added
+    - connections_added: connections successfully wired
+    - saved_to: path of the output file
+    """
+    return _dwsim.modify_dwsim_file(
+        file_path=file_path,
+        add_unit_ops=add_unit_ops,
+        add_connections=[tuple(c) for c in add_connections] if add_connections else None,
+        output_path=output_path,
+    )
 
 
 @mcp.tool()

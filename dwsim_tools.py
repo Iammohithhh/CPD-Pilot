@@ -861,6 +861,83 @@ def list_existing_objects() -> dict:
         }
 
 
+def modify_dwsim_file(
+    file_path: str,
+    add_unit_ops: list[dict] | None = None,
+    add_connections: list[tuple] | None = None,
+    output_path: str | None = None,
+) -> dict:
+    """
+    Load an existing .dwxmz file, add new unit operations and/or connections,
+    and save the result.
+
+    Args:
+        file_path:       path to the existing .dwxmz / .dwxml file.
+        add_unit_ops:    list of dicts with keys: type, name, x (opt), y (opt).
+                         Example: [{"type": "DistillationColumn", "name": "T-01"}]
+        add_connections: list of (from_tag, to_tag) tuples or [from, to] lists.
+        output_path:     where to save the modified file.  Defaults to the
+                         same path as file_path (overwrites).
+
+    Returns a summary of what was found, what was added, and where it was saved.
+    """
+    steps: list[dict] = []
+
+    # ── Load ────────────────────────────────────────────────────────────────
+    r = load_flowsheet(file_path)
+    steps.append({"step": "load_flowsheet", **r})
+    if not r["success"]:
+        return {"success": False, "steps": steps}
+
+    # ── Inspect existing ─────────────────────────────────────────────────────
+    r = list_existing_objects()
+    steps.append({"step": "list_existing_objects", **r})
+    existing_tags = r.get("tags", [])
+
+    # ── Add unit operations ──────────────────────────────────────────────────
+    added_ops: list[dict] = []
+    if add_unit_ops:
+        for op in add_unit_ops:
+            op_type = op.get("type", "")
+            tag = op.get("name", op.get("tag", ""))
+            x = int(op.get("x", 100))
+            y = int(op.get("y", 100))
+            if not op_type or not tag:
+                added_ops.append({"error": f"Missing type or name in {op}"})
+                continue
+            r = add_unit_operation(op_type, tag, x, y)
+            added_ops.append(r)
+        steps.append({"step": "add_unit_operations", "results": added_ops})
+
+    # ── Add connections ──────────────────────────────────────────────────────
+    conn_results: list[dict] = []
+    if add_connections:
+        for conn in add_connections:
+            if len(conn) >= 2:
+                r = connect_objects(str(conn[0]), str(conn[1]))
+                conn_results.append(r)
+        steps.append({"step": "add_connections", "results": conn_results})
+
+    # ── Save ─────────────────────────────────────────────────────────────────
+    save_to = output_path or file_path
+    r = save_flowsheet(save_to)
+    steps.append({"step": "save_flowsheet", **r})
+
+    return {
+        "success": r.get("success", False),
+        "loaded_from": file_path,
+        "saved_to": save_to,
+        "existing_objects": existing_tags,
+        "unit_ops_added": [o.get("tag") for o in added_ops if o.get("success")],
+        "connections_added": [
+            f"{c.get('from')} → {c.get('to')}"
+            for c in conn_results
+            if c.get("success")
+        ],
+        "steps": steps,
+    }
+
+
 def build_flowsheet_no_sim(
     process_data: dict,
     output_dir: str | None = None,
