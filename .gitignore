@@ -13,5 +13,7 @@ outputs/*.dwxmz
 outputs/*.dwxml
 outputs/*.dot
 outputs/*.png
+outputs/*.xlsx
+outputs/*.svg
 .env
 *.log

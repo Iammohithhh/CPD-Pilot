@@ -810,6 +810,259 @@ def load_flowsheet(file_path: str) -> dict:
         return {"success": False, "error": str(exc)}
 
 
+def list_existing_objects() -> dict:
+    """
+    Enumerate all objects in the currently active flowsheet and repopulate
+    the internal object registry.
+
+    Call this after load_flowsheet() to discover what unit operations and
+    streams already exist before adding new ones.
+
+    Returns a list of objects with their tags and types.
+    """
+    global _object_registry
+
+    if _sim is None:
+        return {"success": False, "error": "No flowsheet active."}
+
+    objects: list[dict] = []
+    try:
+        for kvp in _sim.SimulationObjects:
+            try:
+                tag = str(kvp.Key)
+                obj = kvp.Value
+                _object_registry[tag] = obj  # re-register for subsequent ops
+
+                entry: dict = {"tag": tag}
+                try:
+                    entry["type"] = str(obj.GraphicObject.ObjectType)
+                except Exception:
+                    pass
+                try:
+                    entry["x"] = int(obj.GraphicObject.X)
+                    entry["y"] = int(obj.GraphicObject.Y)
+                except Exception:
+                    pass
+                objects.append(entry)
+            except Exception as inner_exc:
+                objects.append({"error": str(inner_exc)})
+
+        return {
+            "success": True,
+            "count": len(objects),
+            "objects": objects,
+            "tags": [o["tag"] for o in objects if "tag" in o],
+        }
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+        }
+
+
+def modify_dwsim_file(
+    file_path: str,
+    add_unit_ops: list[dict] | None = None,
+    add_connections: list[tuple] | None = None,
+    output_path: str | None = None,
+) -> dict:
+    """
+    Load an existing .dwxmz file, add new unit operations and/or connections,
+    and save the result.
+
+    Args:
+        file_path:       path to the existing .dwxmz / .dwxml file.
+        add_unit_ops:    list of dicts with keys: type, name, x (opt), y (opt).
+                         Example: [{"type": "DistillationColumn", "name": "T-01"}]
+        add_connections: list of (from_tag, to_tag) tuples or [from, to] lists.
+        output_path:     where to save the modified file.  Defaults to the
+                         same path as file_path (overwrites).
+
+    Returns a summary of what was found, what was added, and where it was saved.
+    """
+    if not os.path.isfile(file_path):
+        return {
+            "success": False,
+            "error": f"File not found: {file_path}",
+        }
+
+    steps: list[dict] = []
+
+    # ── Load ────────────────────────────────────────────────────────────────
+    r = load_flowsheet(file_path)
+    steps.append({"step": "load_flowsheet", **r})
+    if not r["success"]:
+        return {"success": False, "steps": steps}
+
+    # ── Inspect existing ─────────────────────────────────────────────────────
+    r = list_existing_objects()
+    steps.append({"step": "list_existing_objects", **r})
+    existing_tags = r.get("tags", [])
+
+    # ── Add unit operations ──────────────────────────────────────────────────
+    added_ops: list[dict] = []
+    if add_unit_ops:
+        for op in add_unit_ops:
+            op_type = op.get("type", "")
+            tag = op.get("name", op.get("tag", ""))
+            x = int(op.get("x", 100))
+            y = int(op.get("y", 100))
+            if not op_type or not tag:
+                added_ops.append({"error": f"Missing type or name in {op}"})
+                continue
+            r = add_unit_operation(op_type, tag, x, y)
+            added_ops.append(r)
+        steps.append({"step": "add_unit_operations", "results": added_ops})
+
+    # ── Add connections ──────────────────────────────────────────────────────
+    conn_results: list[dict] = []
+    if add_connections:
+        for conn in add_connections:
+            if len(conn) >= 2:
+                r = connect_objects(str(conn[0]), str(conn[1]))
+                conn_results.append(r)
+        steps.append({"step": "add_connections", "results": conn_results})
+
+    # ── Save ─────────────────────────────────────────────────────────────────
+    save_to = output_path or file_path
+    r = save_flowsheet(save_to)
+    steps.append({"step": "save_flowsheet", **r})
+
+    return {
+        "success": r.get("success", False),
+        "loaded_from": file_path,
+        "saved_to": save_to,
+        "existing_objects": existing_tags,
+        "unit_ops_added": [o.get("tag") for o in added_ops if o.get("success")],
+        "connections_added": [
+            f"{c.get('from')} → {c.get('to')}"
+            for c in conn_results
+            if c.get("success")
+        ],
+        "steps": steps,
+    }
+
+
+def build_flowsheet_no_sim(
+    process_data: dict,
+    output_dir: str | None = None,
+) -> dict:
+    """
+    Build a DWSIM flowsheet topology from process data WITHOUT running the
+    simulation solver.
+
+    Suitable for the PFD-upload workflow where the student wants a pre-wired
+    .dwxmz file that they open in the DWSIM GUI, set stream conditions
+    themselves, and then press Solve.
+
+    Steps performed:
+      1. Initialise DWSIM
+      2. Create flowsheet (compounds + thermo model)
+      3. Add all unit operations
+      4. Add feed / intermediate streams
+      5. Wire all connections
+      6. Save to .dwxmz
+
+    No simulation is run — convergence issues cannot occur here.
+
+    Args:
+        process_data: process_library-compatible dict.  Must contain at
+                      minimum: compounds, thermo_model, unit_operations,
+                      streams, connections.
+        output_dir:   directory for the saved file (default: outputs/).
+
+    Returns a result dict with file_path and a text topology_summary that
+    Claude should show the student for confirmation before saving.
+    """
+    steps: list[dict] = []
+
+    # ── 1. Initialise ───────────────────────────────────────────────────────
+    r = initialize_dwsim()
+    steps.append({"step": "initialise_dwsim", **r})
+    if not r["success"]:
+        return {"success": False, "steps": steps}
+
+    # ── 2. Create flowsheet ─────────────────────────────────────────────────
+    compounds = process_data.get("compounds", [])
+    thermo_model = process_data.get("thermo_model", "Peng-Robinson")
+    r = create_flowsheet(compounds=compounds, thermo_model=thermo_model)
+    steps.append({"step": "create_flowsheet", **r})
+    if not r["success"]:
+        return {"success": False, "steps": steps}
+
+    # ── 3. Add unit operations ───────────────────────────────────────────────
+    unit_ops = process_data.get("unit_operations", [])
+    r = add_all_unit_operations(unit_ops)
+    steps.append({"step": "add_unit_operations", **r})
+    if r.get("added", 0) == 0 and unit_ops:
+        return {"success": False, "error": "All unit operations failed to add.", "steps": steps}
+
+    # ── 4. Add streams ───────────────────────────────────────────────────────
+    streams = process_data.get("streams", [])
+    r = add_material_streams(streams)
+    steps.append({"step": "add_streams", **r})
+
+    # ── 5. Wire connections ──────────────────────────────────────────────────
+    connections = process_data.get("connections", [])
+    r = connect_all(connections)
+    steps.append({"step": "connect_objects", **r})
+
+    # ── 6. Save (no simulation) ──────────────────────────────────────────────
+    out_dir = output_dir or os.path.join(os.path.dirname(__file__), "outputs")
+    chem_name = (
+        process_data.get("chemical", "process")
+        .replace(" ", "_")
+        .replace("/", "_")
+    )
+    save_path = os.path.join(out_dir, f"{chem_name}_topology.dwxmz")
+    r = save_flowsheet(save_path)
+    steps.append({"step": "save_flowsheet", **r})
+
+    # ── Build human-readable topology summary ────────────────────────────────
+    unit_summary = [
+        {
+            "tag": u.get("name", ""),
+            "type": u.get("type", ""),
+            "purpose": u.get("purpose", ""),
+        }
+        for u in unit_ops
+    ]
+    stream_summary = [
+        {"tag": s.get("name", ""), "type": s.get("type", "material")}
+        for s in streams
+    ]
+    conn_lines = [
+        f"  {c[0]} → {c[1]}" if len(c) >= 2 else str(c)
+        for c in connections
+    ]
+    topology_text = (
+        f"Compounds : {', '.join(compounds)}\n"
+        f"Thermo    : {thermo_model}\n"
+        f"Units     : {len(unit_ops)}\n"
+        + "\n".join(f"  [{u['type']}] {u['tag']}  — {u['purpose']}" for u in unit_summary)
+        + f"\nStreams   : {len(stream_summary)}\n"
+        + "\n".join(f"  {s['tag']} ({s['type']})" for s in stream_summary)
+        + f"\nConnections:\n"
+        + "\n".join(conn_lines)
+    )
+
+    return {
+        "success": r.get("success", False),
+        "file_path": save_path if r.get("success") else None,
+        "topology_summary": topology_text,
+        "unit_operations": unit_summary,
+        "streams": stream_summary,
+        "connections": connections,
+        "steps": steps,
+        "next_steps": (
+            "Topology saved. Open the .dwxmz file in the DWSIM GUI. "
+            "Set stream conditions (T, P, flow, composition) as needed, "
+            "then press Solve to run the simulation."
+        ),
+    }
+
+
 def add_energy_stream_to_unit_op(unit_op_tag: str, energy_tag: str | None = None) -> dict:
     """
     Create an EnergyStream and connect it to the energy port of a unit operation.
@@ -1424,6 +1677,166 @@ def setup_reactions(process_data: dict) -> dict:
             "success": False,
             "error": str(exc),
             "traceback": traceback.format_exc(),
+        }
+
+
+def get_manual_reaction_instructions(process_data: dict) -> dict:
+    """
+    Generate step-by-step manual instructions for adding reactions in the DWSIM GUI.
+
+    Returns plain text instructions the student can follow in ~30 seconds.
+    Always works regardless of DWSIM version or reaction complexity.
+
+    Args:
+        process_data: process_library-compatible dict with 'reactions' and
+                      'unit_operations' keys.
+
+    Returns dict with 'instructions' (string) and structured 'reactions' list.
+    """
+    reactions = process_data.get("reactions", [])
+    unit_ops = process_data.get("unit_operations", [])
+
+    _reactor_types = {
+        "ConversionReactor", "EquilibriumReactor", "GibbsReactor", "CSTR", "PFR",
+    }
+    reactor_tags = [op["name"] for op in unit_ops if op.get("type") in _reactor_types]
+
+    if not reactions:
+        return {
+            "instructions": "No reactions are defined for this process — nothing to add.",
+            "reactions": [],
+            "reactor_tags": reactor_tags,
+        }
+
+    lines: list[str] = []
+    lines.append("═" * 60)
+    lines.append("  MANUAL REACTION SETUP — DWSIM GUI")
+    lines.append("═" * 60)
+    lines.append("")
+    lines.append("Step 1 — Open the Reactions Manager")
+    lines.append("  In DWSIM menu: Data → Reactions")
+    lines.append("  (Or press Ctrl+R in some versions)")
+    lines.append("")
+    lines.append("Step 2 — Add each reaction:")
+    lines.append("")
+
+    for i, rxn in enumerate(reactions, 1):
+        eq = rxn.get("equation", "")
+        rxn_type = rxn.get("type", "ConversionReactor")
+        t_c = rxn.get("temperature_C", "")
+        p_bar = rxn.get("pressure_bar", "")
+        conv = rxn.get("conversion")
+        catalyst = rxn.get("catalyst", "")
+
+        if "Conversion" in rxn_type or rxn_type == "ConversionReactor":
+            gui_type = "Conversion Reaction"
+        elif "Equilibrium" in rxn_type:
+            gui_type = "Equilibrium Reaction"
+        elif "Gibbs" in rxn_type:
+            gui_type = "Gibbs Reaction"
+        elif rxn_type in ("CSTR", "PFR"):
+            gui_type = "Kinetic Reaction"
+        else:
+            gui_type = "Conversion Reaction"
+
+        lines.append(f"  Reaction {i}: {eq}")
+        lines.append(f"    a) Click 'Add Reaction' → choose '{gui_type}'")
+        lines.append(f"    b) Enter equation: {eq}")
+        if conv is not None:
+            lines.append(f"    c) Set conversion to: {conv * 100:.0f}%")
+        if t_c:
+            lines.append(f"    d) Temperature: {t_c} °C")
+        if p_bar:
+            lines.append(f"    e) Pressure: {p_bar} bar")
+        if catalyst:
+            lines.append(f"    f) Note catalyst: {catalyst}")
+        lines.append("")
+
+    lines.append("Step 3 — Create a Reaction Set")
+    lines.append("  In the Reactions Manager: click 'Add Reaction Set'")
+    lines.append("  Tick all the reactions you just created")
+    lines.append("  Name it (e.g. 'RXN-SET-01') → click OK")
+    lines.append("")
+    lines.append("Step 4 — Assign the Reaction Set to the reactor(s)")
+    for rtag in reactor_tags:
+        lines.append(f"  Double-click reactor '{rtag}'")
+        lines.append(f"  → 'Reaction Set' dropdown → select 'RXN-SET-01'")
+        lines.append(f"  → click OK")
+    lines.append("")
+    lines.append("Step 5 — Press Solve (F5) and check results")
+    lines.append("═" * 60)
+
+    return {
+        "instructions": "\n".join(lines),
+        "reactions": reactions,
+        "reactor_tags": reactor_tags,
+        "reaction_count": len(reactions),
+    }
+
+
+def configure_reactions_with_fallback(process_data: dict) -> dict:
+    """
+    Try to set up reactions automatically; if it fails return manual instructions.
+
+    This is the recommended entry point for reaction setup:
+    - Auto mode: calls setup_reactions(), which works well for simple stoichiometric
+      reactions from the process library.
+    - On failure: returns manual step-by-step GUI instructions so the student is
+      never blocked.
+
+    Args:
+        process_data: process_library-compatible dict.
+
+    Returns:
+        {
+          "mode": "auto" | "manual_fallback",
+          "success": bool,
+          "auto_result": {...},          # present if auto was tried
+          "manual_instructions": str,   # always present
+          "reactions": [...],
+          "reactor_tags": [...],
+        }
+    """
+    manual = get_manual_reaction_instructions(process_data)
+
+    if _sim is None:
+        return {
+            "mode": "manual_fallback",
+            "success": False,
+            "reason": "No active flowsheet — cannot run auto setup.",
+            "manual_instructions": manual["instructions"],
+            "reactions": manual["reactions"],
+            "reactor_tags": manual["reactor_tags"],
+        }
+
+    auto_result = setup_reactions(process_data)
+
+    if auto_result.get("success"):
+        return {
+            "mode": "auto",
+            "success": True,
+            "auto_result": auto_result,
+            "manual_instructions": manual["instructions"],
+            "reactions": manual["reactions"],
+            "reactor_tags": manual["reactor_tags"],
+            "message": (
+                "Reactions configured automatically. "
+                "If the reactor stays red after Solve, use the manual instructions below."
+            ),
+        }
+    else:
+        return {
+            "mode": "manual_fallback",
+            "success": False,
+            "auto_result": auto_result,
+            "reason": auto_result.get("error", "Auto setup failed."),
+            "manual_instructions": manual["instructions"],
+            "reactions": manual["reactions"],
+            "reactor_tags": manual["reactor_tags"],
+            "message": (
+                "Automatic reaction setup failed. "
+                "Use the manual instructions below — it takes about 30 seconds in the DWSIM GUI."
+            ),
         }
 
 

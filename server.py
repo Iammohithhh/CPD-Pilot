@@ -57,6 +57,7 @@ import pfd_parser as _pfd
 import pfd_generator as _pfg
 import input_handler as _inp
 import balance_reporter as _bal
+import excel_exporter as _excel
 
 # ─────────────────────────────────────────────
 # Create MCP server instance
@@ -66,14 +67,34 @@ mcp = FastMCP(
     "CPD-Pilot",
     instructions=(
         "You are a Chemical Process Design assistant. "
-        "When a user requests a process, follow this workflow:\n"
-        "1. Parse their input with parse_process_request (handles natural language + flow rates)\n"
-        "2. If a PFD image is provided, extract it with extract_pfd_from_image\n"
-        "3. Look up the process in the library, or search the web if not found\n"
-        "4. Generate a PFD diagram for the student\n"
-        "5. Build and run the DWSIM simulation\n"
-        "6. Generate mass balance and energy balance reports\n"
-        "7. Present a comprehensive report with engineering tables"
+        "Three main workflows are available:\n\n"
+        "WORKFLOW A — Design from scratch:\n"
+        "1. Parse input with parse_process_request\n"
+        "2. Look up process in library or search web\n"
+        "3. Generate PFD diagram\n"
+        "4. Build and run DWSIM simulation\n"
+        "5. Generate mass/energy balance reports\n\n"
+        "WORKFLOW B — PFD image → DWSIM file (no simulation):\n"
+        "1. Call extract_pfd_from_image with the uploaded image path\n"
+        "2. Read the image and fill the extraction template\n"
+        "3. Call validate_pfd_data to clean the data\n"
+        "4. Show topology summary to student and ask for confirmation\n"
+        "5. Call build_dwsim_from_pfd to create the .dwxmz file\n"
+        "6. Return the file path — student opens in DWSIM GUI and presses Solve\n\n"
+        "WORKFLOW C — Modify an existing .dwxmz file:\n"
+        "1. Call load_dwsim_file with the uploaded file path\n"
+        "2. Inspect existing objects with list_flowsheet_objects\n"
+        "3. Add new unit ops with add_unit_operation\n"
+        "4. Wire with connect_objects\n"
+        "5. Save with save_flowsheet\n\n"
+        "REACTION SETUP — always ask the student first:\n"
+        "1. Call configure_reactions(process_data, mode='ask') and show question_for_student\n"
+        "2. If student says 'auto': call configure_reactions(process_data, mode='auto')\n"
+        "   — auto falls back to manual instructions automatically if it fails\n"
+        "3. If student says 'manual': call configure_reactions(process_data, mode='manual')\n"
+        "   and display the step-by-step GUI instructions\n\n"
+        "Use prompt templates: 'Design Chemical Process', 'Configure Reactions', "
+        "'PFD to DWSIM File', 'Compare Two Processes'."
     ),
 )
 
@@ -644,6 +665,103 @@ def generate_full_report_from_data(
 
 
 # ─────────────────────────────────────────────
+# EXCEL EXPORT TOOLS
+# ─────────────────────────────────────────────
+
+@mcp.tool()
+def export_mass_balance_excel(
+    stream_results: Annotated[dict, Field(
+        description=(
+            "Stream results dict from get_stream_results(). "
+            "Keys are stream tags, values have T_K, P_Pa, mass_flow_kg_hr, "
+            "mole_fractions, mass_fractions."
+        )
+    )],
+    compounds: Annotated[list[str], Field(
+        description="Ordered list of compound names matching the simulation."
+    )],
+    output_dir: Annotated[str | None, Field(
+        description="Directory to save the .xlsx file. Default: outputs/"
+    )] = None,
+    filename: Annotated[str, Field(
+        description="Output filename. Default: mass_balance.xlsx"
+    )] = "mass_balance.xlsx",
+) -> dict:
+    """
+    Export stream simulation results to a formatted Excel (.xlsx) workbook.
+
+    Produces three sheets in the standard academic ChE format:
+    - Stream Summary : T (°C), P (bar), total flow (kg/hr) per stream
+    - Mass Balance   : component mass flows (kg/hr) per stream, with row totals
+    - Mole Fractions : mole fractions per compound per stream
+
+    The file can be submitted directly for a CPD assignment. No extra formatting
+    required — headers, borders, and alternating row colours are applied.
+
+    Returns the file path of the saved .xlsx.
+    """
+    return _excel.generate_mass_balance_excel(
+        stream_results=stream_results,
+        compounds=compounds,
+        output_dir=output_dir or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "outputs"
+        ),
+        filename=filename,
+    )
+
+
+@mcp.tool()
+def export_full_balance_excel(
+    stream_results: Annotated[dict, Field(
+        description="Stream results from get_stream_results()."
+    )],
+    unit_op_results: Annotated[dict, Field(
+        description="Unit op results from get_unit_op_results()."
+    )],
+    compounds: Annotated[list[str], Field(
+        description="Ordered list of compound names."
+    )],
+    process_data: Annotated[dict | None, Field(
+        description=(
+            "Optional process data dict (from library or build_custom_process). "
+            "Enables the Process Overview sheet with reactions and unit op table."
+        )
+    )] = None,
+    output_dir: Annotated[str | None, Field(
+        description="Directory to save the .xlsx file. Default: outputs/"
+    )] = None,
+    filename: Annotated[str | None, Field(
+        description="Output filename. Default: <chemical>_full_balance.xlsx"
+    )] = None,
+) -> dict:
+    """
+    Export a complete simulation report to a multi-sheet Excel workbook.
+
+    Sheets included:
+    - Stream Summary   : T, P, total flow per stream
+    - Mass Balance     : component mass flows (kg/hr) with totals
+    - Mole Fractions   : per-compound mole fractions
+    - Energy Balance   : duty (kW), ΔP, outlet T for each unit operation
+                         plus an energy summary block (heating / cooling / work)
+    - Process Overview : compound list, thermo model, reactions, unit op table
+                         (only if process_data is provided)
+
+    Use this after a successful simulation to generate a submission-ready
+    engineering report file.
+    """
+    return _excel.generate_full_balance_excel(
+        stream_results=stream_results,
+        unit_op_results=unit_op_results,
+        compounds=compounds,
+        process_data=process_data,
+        output_dir=output_dir or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "outputs"
+        ),
+        filename=filename,
+    )
+
+
+# ─────────────────────────────────────────────
 # DWSIM SIMULATION TOOLS
 # ─────────────────────────────────────────────
 
@@ -883,6 +1001,152 @@ def build_process_from_library(
 
 
 @mcp.tool()
+def modify_dwsim_file(
+    file_path: Annotated[str, Field(
+        description=(
+            "Absolute path to the existing .dwxmz or .dwxml file to modify. "
+            "Example: '/home/user/my_process.dwxmz'"
+        )
+    )],
+    add_unit_ops: Annotated[list[dict] | None, Field(
+        description=(
+            "List of unit operations to add. Each dict must have 'type' and 'name'. "
+            "Optional: 'x', 'y' for canvas position. "
+            "Valid types: Mixer, Splitter, Heater, Cooler, HeatExchanger, Valve, "
+            "Pump, Compressor, Flash, DistillationColumn, ConversionReactor, PFR, CSTR, etc."
+            "Example: [{'type': 'DistillationColumn', 'name': 'T-01', 'x': 300, 'y': 100}]"
+        )
+    )] = None,
+    add_connections: Annotated[list[list[str]] | None, Field(
+        description=(
+            "List of [from_tag, to_tag] pairs to wire. Tags must exist in the file "
+            "(existing or newly added). "
+            "Example: [['S-FEED', 'T-01'], ['T-01', 'S-DIST']]"
+        )
+    )] = None,
+    output_path: Annotated[str | None, Field(
+        description=(
+            "Where to save the modified file. Omit to overwrite the original. "
+            "Use a new path to keep the original intact."
+        )
+    )] = None,
+) -> dict:
+    """
+    Load an existing DWSIM flowsheet, add unit operations and/or connections, and save.
+
+    This is the DWSIM file modification workflow:
+    1. Student uploads their existing .dwxmz file
+    2. Call this tool with the file path and what to add
+    3. The tool loads the file, lists what's already there, adds the requested
+       units and connections, then saves the result
+    4. Student opens the updated file in DWSIM GUI
+
+    Scope: adds unit ops and connections only. Does not modify existing objects.
+    For complex changes (reconfigure existing unit ops), use load_dwsim_file +
+    configure_unit_operation + save_flowsheet separately.
+
+    Returns:
+    - existing_objects: tags already present before modification
+    - unit_ops_added: tags successfully added
+    - connections_added: connections successfully wired
+    - saved_to: path of the output file
+    """
+    return _dwsim.modify_dwsim_file(
+        file_path=file_path,
+        add_unit_ops=add_unit_ops,
+        add_connections=[tuple(c) for c in add_connections] if add_connections else None,
+        output_path=output_path,
+    )
+
+
+@mcp.tool()
+def load_dwsim_file(
+    file_path: Annotated[str, Field(
+        description=(
+            "Absolute path to the .dwxmz or .dwxml file the student wants to modify. "
+            "Example: '/home/user/my_process.dwxmz'"
+        )
+    )],
+) -> dict:
+    """
+    Load an existing DWSIM flowsheet file and list every object inside it.
+
+    Use this as the first step when a student uploads their own .dwxmz file
+    and asks Claude to add or modify unit operations inside it.
+
+    Returns:
+    - loaded_from: path of the file loaded
+    - count: number of objects found
+    - objects: list of {tag, type, x, y} for every unit op and stream
+    - tags: flat list of all tags (for quick reference)
+
+    After this call the flowsheet is active — you can immediately call
+    add_unit_operation, connect_objects, configure_unit_operation, and
+    save_flowsheet to modify it.
+    """
+    r_load = _dwsim.load_flowsheet(file_path)
+    if not r_load.get("success"):
+        return r_load
+    r_list = _dwsim.list_existing_objects()
+    return {**r_load, **r_list}
+
+
+@mcp.tool()
+def list_flowsheet_objects() -> dict:
+    """
+    List all objects in the currently active DWSIM flowsheet.
+
+    Re-enumerates the flowsheet and refreshes the internal object registry.
+    Useful after load_dwsim_file or after manually adding objects to confirm
+    what is present before making further changes.
+
+    Returns count, objects list ({tag, type, x, y}), and flat tags list.
+    """
+    return _dwsim.list_existing_objects()
+
+
+@mcp.tool()
+def build_dwsim_from_pfd(
+    process_data: Annotated[dict, Field(
+        description=(
+            "Process data dict from validate_pfd_data or build_custom_process. "
+            "Must contain: compounds, thermo_model, unit_operations, streams, connections."
+        )
+    )],
+    output_dir: Annotated[str | None, Field(
+        description=(
+            "Directory where the .dwxmz file will be saved. "
+            "Defaults to the 'outputs/' folder in the project directory."
+        )
+    )] = None,
+) -> dict:
+    """
+    Build a DWSIM flowsheet topology from extracted PFD data — WITHOUT running simulation.
+
+    This is the core PFD-upload workflow:
+    1. Student uploads a hand-drawn or digital PFD image
+    2. Claude extracts topology with extract_pfd_from_image + validate_pfd_data
+    3. Claude confirms the understood topology with the student
+    4. This tool builds the .dwxmz file with all units placed and connected
+    5. Student opens the file in DWSIM GUI, sets stream conditions, presses Solve
+
+    No simulation is run — so convergence problems cannot block the student.
+    The file is ready for the student to configure and solve themselves.
+
+    Returns:
+    - success: whether the file was built and saved
+    - file_path: absolute path of the saved .dwxmz
+    - topology_summary: human-readable text summary of what was built
+    - unit_operations, streams, connections: structured topology data
+    - next_steps: instructions for the student
+    """
+    default_output = output_dir or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "outputs"
+    )
+    return _dwsim.build_flowsheet_no_sim(process_data, default_output)
+
+
+@mcp.tool()
 def add_energy_stream_to_unit_op(
     unit_op_tag: Annotated[str, Field(
         description=(
@@ -981,6 +1245,119 @@ def configure_multiple_unit_ops(
 
 
 @mcp.tool()
+def get_manual_reaction_instructions(
+    process_data: Annotated[dict, Field(
+        description=(
+            "Process data dict (from library, build_custom_process, or validate_pfd_data). "
+            "Must have 'reactions' and 'unit_operations' keys."
+        )
+    )],
+) -> dict:
+    """
+    Generate step-by-step GUI instructions for the student to add reactions manually in DWSIM.
+
+    Use this when:
+    - The student says they want to add reactions themselves
+    - Automatic reaction setup failed
+    - The process has complex kinetics (Arrhenius, multi-step) that auto-setup handles poorly
+
+    Returns a clear numbered guide: open Reactions Manager → add each reaction →
+    create Reaction Set → assign to reactor → press Solve.
+
+    The instructions are always correct regardless of DWSIM version or reaction complexity.
+    """
+    return _dwsim.get_manual_reaction_instructions(process_data)
+
+
+@mcp.tool()
+def configure_reactions(
+    process_data: Annotated[dict, Field(
+        description=(
+            "Process data dict with 'reactions' and 'unit_operations' keys. "
+            "From library lookup, build_custom_process, or validate_pfd_data."
+        )
+    )],
+    mode: Annotated[str, Field(
+        description=(
+            "How to handle reaction setup:\n"
+            "  'auto'   — Claude tries setup_reactions() automatically. "
+            "             Falls back to manual instructions if it fails.\n"
+            "  'manual' — Skip auto setup; return GUI instructions immediately.\n"
+            "  'ask'    — Return the question to ask the student, plus both options."
+        )
+    )] = "ask",
+) -> dict:
+    """
+    Flexible reaction configuration with student-choice UX.
+
+    This is the recommended tool for ALL reaction setup. It supports three modes:
+
+    'ask' (default):
+      Returns a formatted question to show the student and structured data for
+      both options. Claude should display this question, wait for the student's
+      answer, then call configure_reactions again with mode='auto' or mode='manual'.
+
+    'auto':
+      Tries automatic reaction setup via setup_reactions(). If it succeeds, done.
+      If it fails, automatically falls back and returns manual instructions so the
+      student is never left stuck.
+
+    'manual':
+      Skips auto setup entirely and returns the step-by-step GUI guide.
+      Use when the student says they prefer to configure reactions themselves,
+      or when dealing with complex kinetics (Arrhenius, multi-step, catalytic).
+
+    Returns differ by mode — always includes manual_instructions so the student
+    can fall back at any point.
+    """
+    if mode == "ask":
+        reactions = process_data.get("reactions", [])
+        manual = _dwsim.get_manual_reaction_instructions(process_data)
+        rxn_summary = "\n".join(
+            f"  • {r.get('equation', 'unknown')}  "
+            f"(T={r.get('temperature_C', '?')}°C, "
+            f"conv={int((r.get('conversion') or 0) * 100)}%)"
+            for r in reactions
+        )
+        question = (
+            f"This process has {len(reactions)} reaction(s):\n{rxn_summary}\n\n"
+            "How would you like to handle reaction setup?\n\n"
+            "**Option A — Claude does it automatically**\n"
+            "  I'll try to configure the reactions programmatically. "
+            "Works well for simple stoichiometric reactions. "
+            "If it fails, I'll give you the manual steps instead.\n\n"
+            "**Option B — You add the reactions yourself in DWSIM**\n"
+            "  I'll give you step-by-step instructions. "
+            "Takes about 30 seconds in the GUI and always works.\n\n"
+            "Which do you prefer? (Reply 'auto' or 'manual')"
+        )
+        return {
+            "mode": "ask",
+            "question_for_student": question,
+            "reactions": reactions,
+            "reactor_tags": manual["reactor_tags"],
+            "manual_instructions": manual["instructions"],
+            "next_step": "Call configure_reactions again with mode='auto' or mode='manual' based on student reply.",
+        }
+
+    if mode == "manual":
+        result = _dwsim.get_manual_reaction_instructions(process_data)
+        result["mode"] = "manual"
+        result["message"] = (
+            "Here are the step-by-step instructions to add reactions in the DWSIM GUI."
+        )
+        return result
+
+    if mode == "auto":
+        return _dwsim.configure_reactions_with_fallback(process_data)
+
+    return {
+        "error": f"Unknown mode '{mode}'. Use 'ask', 'auto', or 'manual'.",
+        "valid_modes": ["ask", "auto", "manual"],
+    }
+
+
+@mcp.tool()
 def setup_reactions(
     chemical: Annotated[str, Field(
         description=(
@@ -1061,6 +1438,84 @@ Please follow these steps:
    - Suggest one process improvement a student could investigate.
 
 Target production rate: {production_rate_kg_hr} kg/hr of {chemical}.
+"""
+
+
+@mcp.prompt(title="Configure Reactions")
+def configure_reactions_prompt(chemical: str = "") -> str:
+    """Guide Claude through the reaction setup decision workflow."""
+    chem_hint = f" for {chemical}" if chemical else ""
+    lookup_hint = (
+        f'Call `lookup_chemical_process("{chemical}")` to get the reaction definitions.'
+        if chemical
+        else "Use the process_data dict already available from the previous step."
+    )
+    return f"""Set up reactions{chem_hint} in the DWSIM simulation.
+
+Follow this workflow:
+
+1. **Get process data**
+   {lookup_hint}
+
+2. **Ask the student** (always do this first)
+   Call `configure_reactions(process_data, mode="ask")` and show the returned
+   `question_for_student` to the student verbatim.
+   Wait for their reply before proceeding.
+
+3a. **If student chooses 'auto':**
+    Call `configure_reactions(process_data, mode="auto")`.
+    - If `mode` in result is `"auto"` and `success` is True → reactions are set up.
+      Tell the student "Reactions configured. Run the simulation now."
+    - If `mode` is `"manual_fallback"` → auto failed.
+      Show the `manual_instructions` from the result and explain what happened.
+
+3b. **If student chooses 'manual':**
+    Call `configure_reactions(process_data, mode="manual")`.
+    Display the `instructions` field to the student.
+    Tell them: "Follow these steps in the DWSIM GUI, then come back and press Solve."
+
+4. **After reactions are configured:**
+   Call `run_simulation()` and report results.
+   If the reactor stays red (unsolved), offer to show manual instructions again.
+"""
+
+
+@mcp.prompt(title="PFD to DWSIM File")
+def pfd_to_dwsim_prompt(image_path: str, chemical_name: str = "") -> str:
+    """Generate a structured prompt to guide Claude through the PFD-upload → DWSIM file workflow."""
+    chem_hint = f" for {chemical_name}" if chemical_name else ""
+    return f"""Convert this PFD image into a ready-to-open DWSIM flowsheet file{chem_hint}.
+
+Image path: {image_path}
+
+Please follow these steps exactly:
+
+1. **Extract the PFD topology**
+   Call `extract_pfd_from_image("{image_path}"{f', "{chemical_name}"' if chemical_name else ''})` to get the extraction prompt and template.
+   Then read the image and fill in the template with every unit operation, stream, and connection you can identify.
+
+2. **Validate the extracted data**
+   Call `validate_pfd_data(extracted_data{f', "{chemical_name}"' if chemical_name else ''})` to clean and normalise the data.
+
+3. **Confirm the topology with the student**
+   Show a clear text summary of what you understood:
+   - List every unit operation (tag, type, purpose)
+   - List every stream (tag, from → to)
+   - List every connection
+   Ask: "Does this match your PFD? Should I correct anything before building the DWSIM file?"
+
+4. **Build the DWSIM file** (only after student confirms)
+   Call `build_dwsim_from_pfd(process_data)` to create the .dwxmz file with all units placed and connected.
+   Do NOT run the simulation — the student will set stream conditions and solve it themselves.
+
+5. **Hand off to the student**
+   Report the saved file path and give clear instructions:
+   - Open the .dwxmz in DWSIM
+   - Set T, P, flow, and composition on each feed stream
+   - Add any reactions in the Reactions Manager if needed
+   - Press Solve (F5)
+
+Image to process: {image_path}
 """
 
 
