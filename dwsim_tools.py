@@ -430,21 +430,29 @@ def add_unit_operation(op_type: str, tag: str, x: int = 100, y: int = 100) -> di
         return {"success": False, "tag": tag, "error": str(exc)}
 
 
-def add_all_unit_operations(unit_ops: list[dict]) -> dict:
+def add_all_unit_operations(unit_ops: list[dict],
+                            connections: list | None = None) -> dict:
     """
     Batch-add unit operations from the process_library structure.
 
+    If *connections* is provided, unit ops are laid out in a process-flow
+    arrangement (left-to-right, multi-row for branches).  Otherwise falls
+    back to a grid layout.
+
     Args:
-        unit_ops: list of dicts with keys 'type', 'name', 'purpose'
+        unit_ops:    list of dicts with keys 'type', 'name', 'purpose'
+        connections: optional list of (from_tag, to_tag) tuples/lists used
+                     to compute a topological layout
 
     Returns summary dict.
     """
-    results = []
-    x, y = 50, 50
-    x_step, y_step = 120, 0
+    positions = _compute_layout(unit_ops, connections)
 
-    for i, op in enumerate(unit_ops):
-        r = add_unit_operation(op["type"], op["name"], x + i * x_step, y + i * y_step)
+    results = []
+    for op in unit_ops:
+        tag = op["name"]
+        px, py = positions.get(tag, (100, 100))
+        r = add_unit_operation(op["type"], tag, px, py)
         results.append(r)
 
     success_count = sum(1 for r in results if r.get("success"))
@@ -457,18 +465,147 @@ def add_all_unit_operations(unit_ops: list[dict]) -> dict:
     }
 
 
-def add_material_streams(streams: list[dict]) -> dict:
+def _compute_layout(
+    unit_ops: list[dict],
+    connections: list | None = None,
+) -> dict[str, tuple[int, int]]:
+    """
+    Compute canvas positions for unit operations based on connection topology.
+
+    Uses a simple BFS-based topological layout:
+      1. Build a directed graph from connections.
+      2. Find source nodes (no incoming edges) — these start at column 0.
+      3. BFS assigns each node to the column after its predecessor.
+      4. Columns become X positions, rows within each column become Y positions.
+
+    Falls back to a grid layout when no connections are provided.
+
+    Returns dict of {tag: (x, y)}.
+    """
+    all_tags = [op["name"] for op in unit_ops]
+
+    if not connections or len(connections) == 0:
+        # Grid layout: 5 columns, wrap to next row
+        positions = {}
+        cols = 5
+        x_step, y_step = 150, 120
+        for i, tag in enumerate(all_tags):
+            col = i % cols
+            row = i // cols
+            positions[tag] = (60 + col * x_step, 60 + row * y_step)
+        return positions
+
+    # Build adjacency data — only for tags that are unit ops (not streams)
+    tag_set = set(all_tags)
+    successors: dict[str, list[str]] = {t: [] for t in all_tags}
+    predecessors: dict[str, list[str]] = {t: [] for t in all_tags}
+
+    for conn in connections:
+        if len(conn) < 2:
+            continue
+        src, dst = str(conn[0]), str(conn[1])
+        # Only include edges between unit-op tags we know about.
+        # Streams in the connection list that are also unit ops get counted.
+        if src in tag_set and dst in tag_set:
+            successors[src].append(dst)
+            predecessors[dst].append(src)
+
+    # Identify source nodes (no predecessors that are unit ops)
+    sources = [t for t in all_tags if len(predecessors[t]) == 0]
+    if not sources:
+        # Cycle or all nodes have predecessors — pick first as source
+        sources = [all_tags[0]]
+
+    # DFS to assign columns.  Chemical processes often have recycle loops
+    # (cycles in the graph).  DFS naturally handles these: if we encounter
+    # a node that's already on the current DFS stack, it's a back-edge
+    # (recycle) and we skip it rather than looping infinitely.
+    column: dict[str, int] = {}
+    _visiting: set[str] = set()  # nodes on the active DFS path
+
+    def _dfs(node: str, depth: int) -> None:
+        if node in _visiting:
+            return  # back-edge (recycle loop) — skip to avoid cycle
+        if node in column and column[node] >= depth:
+            return  # already placed at same or deeper column
+        column[node] = max(column.get(node, 0), depth)
+        _visiting.add(node)
+        for nxt in successors.get(node, []):
+            _dfs(nxt, depth + 1)
+        _visiting.discard(node)
+
+    for s in sources:
+        _dfs(s, 0)
+
+    # Any unreached nodes get placed in the last column + 1
+    max_col = max(column.values()) if column else 0
+    for t in all_tags:
+        if t not in column:
+            max_col += 1
+            column[t] = max_col
+
+    # Group by column, then assign row within column
+    from collections import defaultdict
+    col_groups: dict[int, list[str]] = defaultdict(list)
+    for t in all_tags:
+        col_groups[column[t]].append(t)
+
+    # Compute positions
+    x_step = 160   # horizontal spacing between columns
+    y_step = 100   # vertical spacing within a column
+    x_start = 60
+    y_start = 60
+
+    positions = {}
+    for col_idx in sorted(col_groups.keys()):
+        members = col_groups[col_idx]
+        # Center the column vertically
+        total_height = (len(members) - 1) * y_step
+        y_offset = y_start + max(0, (200 - total_height) // 2)  # center around y=200
+        for row_idx, tag in enumerate(members):
+            positions[tag] = (x_start + col_idx * x_step, y_offset + row_idx * y_step)
+
+    return positions
+
+
+def add_material_streams(streams: list[dict],
+                         connections: list | None = None,
+                         unit_op_positions: dict | None = None) -> dict:
     """
     Add material/energy streams from the process_library stream list.
 
+    If connections and unit_op_positions are provided, feed streams are placed
+    to the left of the unit op they connect to.  Otherwise uses a grid layout.
+
     Each stream dict has keys: name, type, T_C, P_bar, total_flow_kg_hr, composition
     """
+    # Build a map of stream_tag → destination unit from connections
+    stream_dest: dict[str, str] = {}
+    if connections:
+        stream_names = {s["name"] for s in streams}
+        for conn in connections:
+            if len(conn) >= 2 and str(conn[0]) in stream_names:
+                stream_dest[str(conn[0])] = str(conn[1])
+
     results = []
-    x, y = 50, 200
+    grid_x, grid_y = 50, 400  # fallback grid position (below unit ops)
 
     for i, s in enumerate(streams):
+        tag = s["name"]
         stream_type = "MaterialStream" if s.get("type", "material") == "material" else "EnergyStream"
-        r = add_unit_operation(stream_type, s["name"], x + i * 120, y)
+
+        # Try to position left of the destination unit op
+        dest_tag = stream_dest.get(tag)
+        if dest_tag and unit_op_positions and dest_tag in unit_op_positions:
+            ux, uy = unit_op_positions[dest_tag]
+            sx, sy = max(10, ux - 80), uy + 30  # slightly left and below
+        else:
+            # Grid fallback: 6 columns
+            col = i % 6
+            row = i // 6
+            sx, sy = grid_x + col * 130, grid_y + row * 80
+
+        r = add_unit_operation(stream_type, tag, sx, sy)
         results.append(r)
 
     success_count = sum(1 for r in results if r.get("success"))
@@ -564,9 +701,11 @@ def connect_objects(from_tag: str, to_tag: str) -> dict:
             return {"success": True, "from": from_tag, "to": to_tag}
         else:
             # Both sides are unit operations — create an intermediate stream.
+            # Use a clean sequential name to avoid DWSIM API issues with
+            # hyphens in auto-generated tags (e.g. _S-S72-LIQ-VALVE2 breaks).
             _auto_stream_counter = getattr(connect_objects, "_counter", 0) + 1
             connect_objects._counter = _auto_stream_counter
-            mid_tag = f"_S-{from_tag}-{to_tag}"
+            mid_tag = f"_AUTO_S{_auto_stream_counter:03d}"
 
             # Compute canvas position as midpoint between the two units
             try:
@@ -991,20 +1130,23 @@ def build_flowsheet_no_sim(
     if not r["success"]:
         return {"success": False, "steps": steps}
 
-    # ── 3. Add unit operations ───────────────────────────────────────────────
+    # ── 3. Add unit operations (with graph-based layout) ────────────────────
     unit_ops = process_data.get("unit_operations", [])
-    r = add_all_unit_operations(unit_ops)
+    connections = process_data.get("connections", [])
+    r = add_all_unit_operations(unit_ops, connections)
     steps.append({"step": "add_unit_operations", **r})
     if r.get("added", 0) == 0 and unit_ops:
         return {"success": False, "error": "All unit operations failed to add.", "steps": steps}
 
-    # ── 4. Add streams ───────────────────────────────────────────────────────
+    # Capture positions for stream placement
+    unit_positions = _compute_layout(unit_ops, connections)
+
+    # ── 4. Add streams (positioned near their destination unit) ───────────
     streams = process_data.get("streams", [])
-    r = add_material_streams(streams)
+    r = add_material_streams(streams, connections, unit_positions)
     steps.append({"step": "add_streams", **r})
 
     # ── 5. Wire connections ──────────────────────────────────────────────────
-    connections = process_data.get("connections", [])
     r = connect_all(connections)
     steps.append({"step": "connect_objects", **r})
 
@@ -1872,12 +2014,14 @@ def build_process_from_library(process_data: dict, output_dir: str | None = None
     if not r["success"]:
         return {"success": False, "steps": steps}
 
-    # Step 3: add unit operations
-    r = add_all_unit_operations(process_data["unit_operations"])
+    # Step 3: add unit operations (with graph-based layout)
+    connections = process_data.get("connections", [])
+    r = add_all_unit_operations(process_data["unit_operations"], connections)
     steps.append({"step": "add_unit_operations", **r})
 
     # Step 4: add inlet streams
-    r = add_material_streams(process_data["streams"])
+    unit_positions = _compute_layout(process_data["unit_operations"], connections)
+    r = add_material_streams(process_data["streams"], connections, unit_positions)
     steps.append({"step": "add_streams", **r})
 
     # Step 5: set stream conditions
