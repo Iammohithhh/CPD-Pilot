@@ -749,14 +749,29 @@ def connect_objects(from_tag: str, to_tag: str) -> dict:
         return {"success": False, "from": from_tag, "to": to_tag, "error": str(exc)}
 
 
-def connect_all(connections: list[tuple[str, str]]) -> dict:
+def connect_all(connections: list) -> dict:
     """
-    Connect all object pairs from the process_library connections list.
+    Connect all object pairs from the connections list.
+
+    Supports two formats:
+      - Pair:   [from_tag, to_tag]  — direct connection (at least one must be a stream)
+      - Triplet: [from_tag, stream_tag, to_tag] — expanded automatically into two pairs:
+                  (from_tag → stream_tag) and (stream_tag → to_tag)
+
+    DWSIM requires a MaterialStream between every two unit operations.
+    Always route through named stream tags rather than connecting unit-op to unit-op.
     """
     results = []
-    for (from_tag, to_tag) in connections:
-        r = connect_objects(from_tag, to_tag)
-        results.append(r)
+    for conn in connections:
+        if len(conn) == 3:
+            # Triplet: unit_op → stream → unit_op — expand into two pair calls
+            r1 = connect_objects(str(conn[0]), str(conn[1]))
+            results.append(r1)
+            r2 = connect_objects(str(conn[1]), str(conn[2]))
+            results.append(r2)
+        elif len(conn) >= 2:
+            r = connect_objects(str(conn[0]), str(conn[1]))
+            results.append(r)
 
     success_count = sum(1 for r in results if r.get("success"))
     return {

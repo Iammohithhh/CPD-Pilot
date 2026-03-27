@@ -235,7 +235,20 @@ EMPTY_PROCESS_TEMPLATE = {
             "composition": {},
         }
     ],
-    "connections": [],
+    # connections: list of [from_tag, to_tag] pairs.
+    # IMPORTANT: every connection must go THROUGH a named stream tag.
+    # Never connect unit-op directly to unit-op — always route via a stream.
+    # Pattern: feed streams first, then alternating unit-op → stream → unit-op:
+    #   ["S-01", "MIX-101"]     ← feed stream into mixer
+    #   ["MIX-101", "S-02"]     ← mixer outlet to intermediate stream
+    #   ["S-02", "H-101"]       ← intermediate stream into heater
+    #   ...
+    # Every named stream in the 'streams' list MUST appear in at least one connection.
+    "connections": [
+        ["S-01", "UNIT-101"],
+        ["UNIT-101", "S-02"],
+        ["S-02", "UNIT-102"],
+    ],
     "notes": "",
 }
 
