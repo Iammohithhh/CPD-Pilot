@@ -482,7 +482,15 @@ def build_custom_process(
         )
     )],
     connections: Annotated[list[list[str]], Field(
-        description="List of [from_tag, to_tag] pairs for wiring the flowsheet."
+        description=(
+            "List of [from_tag, to_tag] pairs for wiring the flowsheet. "
+            "CRITICAL: connections must always route THROUGH named stream tags — "
+            "never connect a unit-op directly to another unit-op. "
+            "Every stream in the 'streams' list must appear in at least one connection. "
+            "Pattern: ['S-01', 'MIX-101'] (stream→unit), ['MIX-101', 'S-02'] (unit→stream), "
+            "['S-02', 'H-101'] (stream→unit), etc. "
+            "Feed streams come first, then alternate unit→stream→unit through the flowsheet."
+        )
     )],
     notes: Annotated[str, Field(
         description="Additional process notes."
@@ -1129,7 +1137,10 @@ def build_dwsim_from_pfd(
     process_data: Annotated[dict, Field(
         description=(
             "Process data dict from validate_pfd_data or build_custom_process. "
-            "Must contain: compounds, thermo_model, unit_operations, streams, connections."
+            "Must contain: compounds, thermo_model, unit_operations, streams, connections. "
+            "CRITICAL for connections: every connection must route through a named stream tag. "
+            "Never write [unit_op, unit_op] — always [unit_op, stream] and [stream, unit_op]. "
+            "Every stream in the 'streams' list must appear in at least one connection pair."
         )
     )],
     output_dir: Annotated[str | None, Field(
@@ -1524,6 +1535,13 @@ Please follow these steps exactly:
    Call {extract_call} to get the extraction prompt and template.
    {image_note}
    Fill in the template with every unit operation, stream, and connection you can identify.
+
+   **Connection format rule (critical for wiring to work):**
+   Every connection must go THROUGH a named stream tag — never connect unit-op to unit-op directly.
+   Use pairs: `["S-01", "MIX-101"]` (stream→unit) and `["MIX-101", "S-02"]` (unit→stream).
+   Every stream you list must appear in at least one connection pair.
+   Example for a 3-unit chain with 4 streams:
+     `[["S-01","MIX-101"], ["MIX-101","S-02"], ["S-02","H-101"], ["H-101","S-03"], ...]`
 
 2. **Validate the extracted data**
    Call `validate_pfd_data(extracted_data{chem_arg})` to clean and normalise the data.
