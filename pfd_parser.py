@@ -61,7 +61,14 @@ Extract ALL of the following information from this diagram and return it as a JS
   ],
 
   "connections": [
-    ["from_tag", "to_tag"]
+    "IMPORTANT: Connections must ALWAYS route through named stream tags.",
+    "Never connect a unit op directly to another unit op.",
+    "Every stream tag from the streams list must appear in at least one connection.",
+    "Use PAIRS like: [unit_op, stream] and [stream, unit_op].",
+    "Example for a chain: F-101 → S-02 → C-101 → S-03 → R-101:",
+    ["F-101", "S-02"], ["S-02", "C-101"], ["C-101", "S-03"], ["S-03", "R-101"],
+    "Feed streams connect as: [S-01, first_unit_op].",
+    "Product streams connect as: [last_unit_op, S-PROD]."
   ],
 
   "compounds_visible": ["List of chemical names/formulas visible on the diagram"],
@@ -83,6 +90,13 @@ IMPORTANT:
 - Use your best judgment for equipment types based on their shape/symbol
 - Standard PFD symbols: circles = pumps/compressors, rectangles = vessels/columns,
   triangles/trapezoids = heaters/coolers, cylinders = tanks
+
+CONNECTION FORMAT RULES (critical for DWSIM wiring):
+- Every connection MUST be a [from_tag, to_tag] pair where at least one side is a stream
+- NEVER write [unit_op, unit_op] — always route through a named stream from your streams list
+- Feed streams: ["S-01", "F-101"] (stream into unit)
+- Between units: ["F-101", "S-02"], ["S-02", "C-101"] (unit→stream, stream→unit)
+- Product streams: ["T-101", "S-PROD"] (unit into product stream)
 
 Return ONLY the JSON object, no other text.
 """
@@ -210,20 +224,61 @@ def validate_extracted_pfd(data: dict) -> dict:
             if "type" not in stream:
                 stream["type"] = "material"
 
-    # Check connections
+    # Check connections — must route through named stream tags
     if "connections" not in cleaned or not cleaned["connections"]:
-        # Try to infer from streams
+        # Infer stream-inclusive connections from stream from_unit/to_unit data
         inferred = []
         for stream in cleaned.get("streams", []):
+            stag = stream.get("tag", "")
             from_u = stream.get("from_unit")
             to_u = stream.get("to_unit")
-            if from_u and to_u and from_u != "FEED" and to_u != "PRODUCT":
-                inferred.append([from_u, to_u])
+            if not stag:
+                continue
+            # from_unit → stream (unless it's an external feed)
+            if from_u and from_u not in ("FEED", "EXTERNAL", ""):
+                inferred.append([from_u, stag])
+            # stream → to_unit (unless it's a product leaving the system)
+            if to_u and to_u not in ("PRODUCT", "OUTPUT", ""):
+                inferred.append([stag, to_u])
         if inferred:
             cleaned["connections"] = inferred
             warnings.append(f"Connections inferred from stream data ({len(inferred)} found).")
         else:
             warnings.append("No connections found or inferred.")
+    else:
+        # Validate existing connections go through streams, not unit→unit
+        stream_tags = {s.get("tag") for s in cleaned.get("streams", []) if s.get("tag")}
+        unit_tags = {op.get("tag") for op in cleaned.get("unit_operations", []) if op.get("tag")}
+        fixed_conns = []
+        for conn in cleaned["connections"]:
+            if not isinstance(conn, (list, tuple)) or len(conn) < 2:
+                continue
+            a, b = str(conn[0]), str(conn[1])
+            # If both sides are unit ops (neither is a stream), try to find
+            # the stream that connects them using from_unit/to_unit metadata
+            if a in unit_tags and b in unit_tags and a not in stream_tags and b not in stream_tags:
+                # Look for a stream whose from_unit=a and to_unit=b
+                bridging_stream = None
+                for s in cleaned.get("streams", []):
+                    if s.get("from_unit") == a and s.get("to_unit") == b:
+                        bridging_stream = s.get("tag")
+                        break
+                if bridging_stream:
+                    fixed_conns.append([a, bridging_stream])
+                    fixed_conns.append([bridging_stream, b])
+                    warnings.append(
+                        f"Connection [{a}, {b}] expanded to [{a}, {bridging_stream}] + [{bridging_stream}, {b}]."
+                    )
+                else:
+                    # No matching stream found — keep as-is (will create auto stream)
+                    fixed_conns.append([a, b])
+                    warnings.append(
+                        f"Connection [{a}, {b}] is unit→unit (no named stream between them). "
+                        f"An intermediate stream will be auto-created."
+                    )
+            else:
+                fixed_conns.append([a, b])
+        cleaned["connections"] = fixed_conns
 
     return {
         "valid": len([w for w in warnings if "missing" not in w.lower()]) == 0,
@@ -276,8 +331,8 @@ def pfd_to_process_dict(
 
     connections = []
     for conn in extracted_data.get("connections", []):
-        if isinstance(conn, (list, tuple)) and len(conn) == 2:
-            connections.append(tuple(conn))
+        if isinstance(conn, (list, tuple)) and len(conn) >= 2:
+            connections.append(tuple(conn[:2]) if len(conn) == 2 else tuple(conn[:3]))
 
     compounds = extracted_data.get("compounds_visible", [])
 
