@@ -1173,7 +1173,47 @@ def build_dwsim_from_pfd(
     default_output = output_dir or os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "outputs"
     )
-    return _dwsim.build_flowsheet_no_sim(process_data, default_output)
+
+    # Pre-flight: auto-fix unit→unit connections using stream metadata.
+    # This catches the common case where Claude sends [unit_op, unit_op]
+    # instead of routing through named streams.
+    stream_tags = {s.get("name") or s.get("tag") for s in process_data.get("streams", [])}
+    unit_tags = {op.get("name") for op in process_data.get("unit_operations", [])}
+    raw_conns = process_data.get("connections", [])
+    fixed_conns = []
+    warnings = []
+    for conn in raw_conns:
+        if not isinstance(conn, (list, tuple)) or len(conn) < 2:
+            continue
+        a, b = str(conn[0]), str(conn[1])
+        if len(conn) == 3:
+            # Triplet [unit, stream, unit] — expand
+            fixed_conns.append([a, str(conn[1])])
+            fixed_conns.append([str(conn[1]), str(conn[2])])
+            continue
+        # If both sides are unit ops, try to find a bridging stream
+        if a in unit_tags and b in unit_tags and a not in stream_tags and b not in stream_tags:
+            bridging = None
+            for s in process_data.get("streams", []):
+                stag = s.get("name") or s.get("tag")
+                if s.get("from_unit") == a and s.get("to_unit") == b:
+                    bridging = stag
+                    break
+            if bridging:
+                fixed_conns.append([a, bridging])
+                fixed_conns.append([bridging, b])
+                warnings.append(f"Auto-fixed: [{a}, {b}] → [{a}, {bridging}] + [{bridging}, {b}]")
+            else:
+                fixed_conns.append([a, b])  # let connect_objects create AUTO_S
+                warnings.append(f"Unit→unit connection [{a}, {b}]: auto-stream will be created")
+        else:
+            fixed_conns.append([a, b])
+    process_data = dict(process_data, connections=fixed_conns)
+
+    result = _dwsim.build_flowsheet_no_sim(process_data, default_output)
+    if warnings:
+        result["connection_fixup_warnings"] = warnings
+    return result
 
 
 @mcp.tool()

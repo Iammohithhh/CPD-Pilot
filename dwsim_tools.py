@@ -290,10 +290,29 @@ def _obj_type(name: str):
         "ComponentSeparator":_ot("ComponentSeparator"),
         "Recycle":           _ot("Recycle"),
     }
-    if name not in _MAP:
-        raise ValueError(f"Unknown unit operation type: '{name}'. "
-                         f"Available: {list(_MAP.keys())}")
-    return _MAP[name]
+    if name in _MAP:
+        return _MAP[name]
+
+    # Try common aliases / fuzzy matching before raising
+    _ALIASES = {
+        "reactor": "ConversionReactor", "distillation": "DistillationColumn",
+        "column": "DistillationColumn", "tower": "DistillationColumn",
+        "absorber": "AbsorptionColumn", "stripper": "AbsorptionColumn",
+        "heat exchanger": "HeatExchanger", "exchanger": "HeatExchanger",
+        "separator": "Flash", "flash drum": "Flash", "drum": "Flash",
+        "turbine": "Expander", "furnace": "Heater", "condenser": "Cooler",
+        "reboiler": "Heater", "tee": "Splitter", "storage": "Tank",
+        "filter": "Filter", "plug flow": "PFR", "stirred tank": "CSTR",
+        "vaporizer": "Heater", "boiler": "Heater",
+        "waste heat boiler": "HeatExchanger", "oxidizer": "ConversionReactor",
+    }
+    lower = name.lower().strip()
+    for alias, canonical in _ALIASES.items():
+        if alias in lower or lower in alias:
+            return _MAP[canonical]
+
+    raise ValueError(f"Unknown unit operation type: '{name}'. "
+                     f"Available: {list(_MAP.keys())}")
 
 
 # ─────────────────────────────────────────────
@@ -425,6 +444,16 @@ def add_unit_operation(op_type: str, tag: str, x: int = 100, y: int = 100) -> di
             obj_wrapper = _sim.AddObject(ot, x, y, tag)
             obj = obj_wrapper.GetAsObject()
         _object_registry[tag] = obj
+
+        # Explicitly set GraphicObject position (some DWSIM versions
+        # ignore the x,y constructor arguments)
+        try:
+            go = obj.GraphicObject
+            go.X = int(x)
+            go.Y = int(y)
+        except Exception:
+            pass  # cosmetic — don't fail the add
+
         return {"success": True, "tag": tag, "type": op_type}
     except Exception as exc:
         return {"success": False, "tag": tag, "error": str(exc)}
@@ -663,8 +692,16 @@ def _is_stream(tag: str) -> bool:
         type_name = obj.GraphicObject.ObjectType.ToString()
         return type_name in ("MaterialStream", "EnergyStream")
     except Exception:
-        # Fallback: stream tags often start with "S-"
-        return tag.startswith("S-")
+        pass
+    # Fallback: check the .NET type name directly
+    try:
+        clr_name = type(obj).__name__
+        return "Stream" in clr_name
+    except Exception:
+        pass
+    # Last resort: check if the tag was added as a stream type
+    # (the tag prefix "S-" is unreliable — units can also start with S)
+    return False
 
 
 def connect_objects(from_tag: str, to_tag: str) -> dict:
@@ -1162,8 +1199,8 @@ def build_flowsheet_no_sim(
     steps.append({"step": "add_streams", **r})
 
     # ── 5. Wire connections ──────────────────────────────────────────────────
-    r = connect_all(connections)
-    steps.append({"step": "connect_objects", **r})
+    conn_result = connect_all(connections)
+    steps.append({"step": "connect_objects", **conn_result})
 
     # ── 6. Save (no simulation) ──────────────────────────────────────────────
     out_dir = output_dir or os.path.join(os.path.dirname(__file__), "outputs")
@@ -1204,10 +1241,33 @@ def build_flowsheet_no_sim(
         + "\n".join(conn_lines)
     )
 
+    save_ok = r.get("success", False)
+    conn_ok = conn_result.get("success", False)
+    conn_failed = conn_result.get("failed", 0)
+    conn_total = conn_result.get("connected", 0) + conn_failed
+
+    # Report connection failures clearly
+    conn_warning = ""
+    if not conn_ok and conn_failed > 0:
+        failed_details = [
+            d for d in conn_result.get("details", []) if not d.get("success")
+        ]
+        failed_summary = "; ".join(
+            f"{d.get('from','?')}→{d.get('to','?')}: {d.get('error','unknown')}"
+            for d in failed_details[:5]  # limit to first 5
+        )
+        conn_warning = (
+            f"\n\nWARNING: {conn_failed}/{conn_total} connections failed to wire. "
+            f"Details: {failed_summary}"
+        )
+
     return {
-        "success": r.get("success", False),
-        "file_path": save_path if r.get("success") else None,
-        "topology_summary": topology_text,
+        "success": save_ok,
+        "file_path": save_path if save_ok else None,
+        "connections_wired": conn_result.get("connected", 0),
+        "connections_failed": conn_failed,
+        "connection_warning": conn_warning if conn_warning else None,
+        "topology_summary": topology_text + conn_warning,
         "unit_operations": unit_summary,
         "streams": stream_summary,
         "connections": connections,
