@@ -75,8 +75,10 @@ mcp = FastMCP(
         "4. Build and run DWSIM simulation\n"
         "5. Generate mass/energy balance reports\n\n"
         "WORKFLOW B — PFD image → DWSIM file (no simulation):\n"
-        "1. Call extract_pfd_from_image with the uploaded image path\n"
-        "2. Read the image and fill the extraction template\n"
+        "1. Call extract_pfd_from_image — pass image_path if user gave a file path, "
+        "or omit it entirely if the user uploaded the image directly into chat "
+        "(the image is already in your context, no path needed)\n"
+        "2. Read the image (from path or from chat context) and fill the extraction template\n"
         "3. Call validate_pfd_data to clean the data\n"
         "4. Show topology summary to student and ask for confirmation\n"
         "5. Call build_dwsim_from_pfd to create the .dwxmz file\n"
@@ -240,12 +242,13 @@ def parse_process_request(
 
 @mcp.tool()
 def extract_pfd_from_image(
-    image_path: Annotated[str, Field(
+    image_path: Annotated[str | None, Field(
         description=(
-            "Path to the PFD image file uploaded by the user. "
-            "Supports PNG, JPG, PDF formats."
+            "Path to the PFD image file on disk (PNG, JPG, PDF). "
+            "Omit or pass null if the user uploaded the image directly into the chat — "
+            "Claude already has the image in context and will read it without a file path."
         )
-    )],
+    )] = None,
     chemical_name: Annotated[str, Field(
         description="Name of the target chemical (helps with validation)."
     )] = "",
@@ -256,31 +259,47 @@ def extract_pfd_from_image(
     """
     Extract process data from a PFD (Process Flow Diagram) image.
 
-    This tool returns:
-    1. A structured prompt for Claude to analyze the image
-    2. Validation rules for the extracted data
-    3. A template to fill in
+    Supports two input modes:
+    - File path: user provides a path to a saved image → pass it as image_path
+    - Direct upload: user drags/pastes the image into the chat → omit image_path;
+      Claude already has the image in its context and reads it directly.
 
-    WORKFLOW:
-    - Call this tool to get the extraction prompt
-    - Then use Claude's vision to read the image and fill in the template
-    - Pass the filled data back to validate_pfd_data to check and clean it
+    Returns:
+    1. extraction_prompt  — the vision prompt Claude should apply to the image
+    2. empty_template     — the structured template to fill in with extracted data
+    3. instructions       — step-by-step guide for the rest of the workflow
+
+    After calling this tool, Claude must:
+    - Read the image (from path or from chat context)
+    - Apply extraction_prompt to identify all unit ops, streams, and connections
+    - Fill empty_template with the extracted data
+    - Call validate_pfd_data with the filled template
     """
     prompt = _pfd.get_extraction_prompt()
     template = _ws.get_empty_template()
+
+    if image_path:
+        read_instruction = f"1. Read the image at '{image_path}' using the Read tool"
+    else:
+        read_instruction = (
+            "1. The image was uploaded directly into the chat — "
+            "use it from your current context (no Read tool needed)"
+        )
 
     return {
         "extraction_prompt": prompt,
         "empty_template": template,
         "image_path": image_path,
+        "image_source": "file_path" if image_path else "chat_upload",
         "chemical_name": chemical_name,
         "thermo_model": thermo_model,
         "instructions": (
-            "1. Read the image at the given path using the Read tool\n"
-            "2. Use the extraction_prompt to analyze the PFD\n"
-            "3. Fill in the template with extracted data\n"
+            f"{read_instruction}\n"
+            "2. Apply the extraction_prompt to the image to identify all unit ops, "
+            "streams, and connections\n"
+            "3. Fill in the empty_template with what you extracted\n"
             "4. Call validate_pfd_data with the filled template\n"
-            "5. Use the validated data with build_custom_process or DWSIM tools"
+            "5. Use the validated data with build_dwsim_from_pfd"
         ),
     }
 
@@ -1481,21 +1500,33 @@ Follow this workflow:
 
 
 @mcp.prompt(title="PFD to DWSIM File")
-def pfd_to_dwsim_prompt(image_path: str, chemical_name: str = "") -> str:
+def pfd_to_dwsim_prompt(image_path: str = "", chemical_name: str = "") -> str:
     """Generate a structured prompt to guide Claude through the PFD-upload → DWSIM file workflow."""
     chem_hint = f" for {chemical_name}" if chemical_name else ""
+    chem_arg = f', "{chemical_name}"' if chemical_name else ""
+
+    if image_path:
+        image_context = f"Image path: {image_path}"
+        extract_call = f'`extract_pfd_from_image("{image_path}"{chem_arg})`'
+        image_note = f"Then read the image at `{image_path}` using the Read tool."
+    else:
+        image_context = "Image source: uploaded directly into this chat"
+        extract_call = f'`extract_pfd_from_image({chem_arg.lstrip(", ")})`' if chemical_name else "`extract_pfd_from_image()`"
+        image_note = "The image is already in your context — read it directly, no file path needed."
+
     return f"""Convert this PFD image into a ready-to-open DWSIM flowsheet file{chem_hint}.
 
-Image path: {image_path}
+{image_context}
 
 Please follow these steps exactly:
 
 1. **Extract the PFD topology**
-   Call `extract_pfd_from_image("{image_path}"{f', "{chemical_name}"' if chemical_name else ''})` to get the extraction prompt and template.
-   Then read the image and fill in the template with every unit operation, stream, and connection you can identify.
+   Call {extract_call} to get the extraction prompt and template.
+   {image_note}
+   Fill in the template with every unit operation, stream, and connection you can identify.
 
 2. **Validate the extracted data**
-   Call `validate_pfd_data(extracted_data{f', "{chemical_name}"' if chemical_name else ''})` to clean and normalise the data.
+   Call `validate_pfd_data(extracted_data{chem_arg})` to clean and normalise the data.
 
 3. **Confirm the topology with the student**
    Show a clear text summary of what you understood:
@@ -1514,8 +1545,6 @@ Please follow these steps exactly:
    - Set T, P, flow, and composition on each feed stream
    - Add any reactions in the Reactions Manager if needed
    - Press Solve (F5)
-
-Image to process: {image_path}
 """
 
 
