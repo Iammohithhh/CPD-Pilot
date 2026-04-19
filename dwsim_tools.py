@@ -704,6 +704,32 @@ def _is_stream(tag: str) -> bool:
     return False
 
 
+def _try_connect_go(src_go, dst_go) -> bool:
+    """
+    Call _interf.ConnectObjects with several port-pair fallbacks.
+
+    DWSIM's auto-port (-1, -1) silently skips a connection when the chosen
+    port is already occupied (e.g. a Flash that already has its vapour outlet
+    wired will silently fail a second -1,-1 attempt for the liquid outlet).
+    Retrying with explicit port indices works around this.
+
+    Returns True on the first non-exception call (DWSIM does not raise when
+    it succeeds, so any non-exception is treated as success).
+    """
+    port_pairs = [(-1, -1), (0, 0), (0, -1), (-1, 0),
+                  (1, -1), (-1, 1), (1, 0), (0, 1), (1, 1)]
+    last_exc: Exception | None = None
+    for fp, tp in port_pairs:
+        try:
+            with _suppress_native_stdout():
+                _interf.ConnectObjects(_sim, src_go, dst_go, fp, tp)
+            return True
+        except Exception as exc:
+            last_exc = exc
+            continue
+    return False
+
+
 def connect_objects(from_tag: str, to_tag: str) -> dict:
     """
     Connect two objects in the flowsheet.
@@ -711,6 +737,11 @@ def connect_objects(from_tag: str, to_tag: str) -> dict:
     DWSIM requires MaterialStream objects between unit operations.
     If both from_tag and to_tag are unit operations (not streams),
     an intermediate MaterialStream is created automatically.
+
+    Each ConnectObjects call is made in its own _suppress_native_stdout()
+    context so DWSIM can fully process the first connection before the second
+    is attempted (batching both calls in one context caused silent failures
+    on multi-outlet unit ops such as Flash and ShortcutColumn).
     """
     if _sim is None:
         return {"success": False, "error": "No flowsheet active."}
@@ -728,13 +759,13 @@ def connect_objects(from_tag: str, to_tag: str) -> dict:
         to_is_stream = _is_stream(to_tag)
 
         if from_is_stream or to_is_stream:
-            # At least one side is a stream — direct connection is fine.
-            # ConnectObjects is a method on _interf (Automation3), NOT on _sim.
-            with _suppress_native_stdout():
-                _interf.ConnectObjects(
-                    _sim,
-                    from_obj.GraphicObject, to_obj.GraphicObject, -1, -1
-                )
+            # At least one side is a stream — direct connection.
+            ok = _try_connect_go(from_obj.GraphicObject, to_obj.GraphicObject)
+            if not ok:
+                return {
+                    "success": False, "from": from_tag, "to": to_tag,
+                    "error": "ConnectObjects failed on all port combinations.",
+                }
             return {"success": True, "from": from_tag, "to": to_tag}
         else:
             # Both sides are unit operations — create an intermediate stream.
@@ -765,17 +796,22 @@ def connect_objects(from_tag: str, to_tag: str) -> dict:
 
             mid_obj = _object_registry[mid_tag]
 
-            # Connect: source unit → intermediate stream → destination unit
-            # Both calls must go through _interf.ConnectObjects(_sim, ...).
-            with _suppress_native_stdout():
-                _interf.ConnectObjects(
-                    _sim,
-                    from_obj.GraphicObject, mid_obj.GraphicObject, -1, -1
-                )
-                _interf.ConnectObjects(
-                    _sim,
-                    mid_obj.GraphicObject, to_obj.GraphicObject, -1, -1
-                )
+            # Each ConnectObjects call gets its own suppress context so DWSIM
+            # fully registers the first wiring before the second is attempted.
+            ok1 = _try_connect_go(from_obj.GraphicObject, mid_obj.GraphicObject)
+            ok2 = _try_connect_go(mid_obj.GraphicObject, to_obj.GraphicObject)
+
+            if not (ok1 and ok2):
+                return {
+                    "success": False,
+                    "from": from_tag,
+                    "to": to_tag,
+                    "intermediate_stream": mid_tag,
+                    "error": (
+                        f"Intermediate stream '{mid_tag}' wiring incomplete "
+                        f"(leg1_ok={ok1}, leg2_ok={ok2})."
+                    ),
+                }
             return {
                 "success": True,
                 "from": from_tag,
