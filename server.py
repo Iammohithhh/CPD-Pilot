@@ -1,25 +1,21 @@
 """
-server.py — MCP server for Chemical Process Design (CPD) Pilot.
+server.py — MCP server for Chemical Process Design (CPD) Pilot (v1 — 5-stage workflow).
 
 Exposes the following tools to Claude:
 
-  PROCESS LIBRARY (always available):
+  PROCESS LIBRARY:
     • lookup_chemical_process    — get blueprint for a named chemical
     • list_available_processes   — list all chemicals in the library
     • get_process_summary        — human-readable summary card
 
   INPUT HANDLING:
     • parse_process_request      — parse natural language descriptions
-    • extract_pfd_from_image     — extract process data from PFD image
-
-  PFD GENERATION:
-    • generate_pfd               — create text + graphviz PFD diagrams
 
   WEB SEARCH (for chemicals not in library):
     • search_chemical_process    — search web for industrial process info
     • build_custom_process       — build process dict from Claude's knowledge
 
-  DWSIM SIMULATION (requires DWSIM installation):
+  DWSIM (requires DWSIM installation):
     • dwsim_status               — check if DWSIM is available
     • create_flowsheet           — create flowsheet with compounds + thermo model
     • add_unit_operation         — add a single unit operation
@@ -29,12 +25,8 @@ Exposes the following tools to Claude:
     • get_stream_results         — read T, P, flow, composition from streams
     • get_unit_op_results        — read duty, ΔP etc. from unit operations
     • save_flowsheet             — save to .dwxmz file
-    • build_process_from_library — one-shot: build + run + save from library
-
-  REPORTING:
-    • generate_mass_balance      — formatted mass balance table
-    • generate_energy_balance    — formatted energy balance table
-    • generate_full_report       — comprehensive simulation report
+    • build_process_from_library — one-shot: build topology + save from library
+    • export_flowsheet_image     — export DWSIM flowsheet as PNG / SVG
 
 Usage:
     python server.py                  (stdio — for Claude Desktop / Claude Code)
@@ -53,11 +45,7 @@ from mcp.server.fastmcp import FastMCP
 import process_library as _lib
 import dwsim_tools as _dwsim
 import web_search as _ws
-import pfd_parser as _pfd
-import pfd_generator as _pfg
 import input_handler as _inp
-import balance_reporter as _bal
-import excel_exporter as _excel
 
 # ─────────────────────────────────────────────
 # Create MCP server instance
@@ -67,36 +55,26 @@ mcp = FastMCP(
     "CPD-Pilot",
     instructions=(
         "You are a Chemical Process Design assistant. "
-        "Three main workflows are available:\n\n"
-        "WORKFLOW A — Design from scratch:\n"
-        "1. Parse input with parse_process_request\n"
-        "2. Look up process in library or search web\n"
-        "3. Generate PFD diagram\n"
-        "4. Build and run DWSIM simulation\n"
-        "5. Generate mass/energy balance reports\n\n"
-        "WORKFLOW B — PFD image → DWSIM file (no simulation):\n"
-        "1. Call extract_pfd_from_image — pass image_path if user gave a file path, "
-        "or omit it entirely if the user uploaded the image directly into chat "
-        "(the image is already in your context, no path needed)\n"
-        "2. Read the image (from path or from chat context) and fill the extraction template\n"
-        "3. Call validate_pfd_data to clean the data\n"
-        "4. Show topology summary to student and ask for confirmation\n"
-        "5. Call build_dwsim_from_pfd to create the .dwxmz file\n"
-        "6. Return the file path — student opens in DWSIM GUI and presses Solve\n\n"
-        "WORKFLOW C — Modify an existing .dwxmz file:\n"
-        "1. Call load_dwsim_file with the uploaded file path\n"
-        "2. Inspect existing objects with list_flowsheet_objects\n"
-        "3. Add new unit ops with add_unit_operation\n"
-        "4. Wire with connect_objects\n"
-        "5. Save with save_flowsheet\n\n"
-        "REACTION SETUP — always ask the student first:\n"
-        "1. Call configure_reactions(process_data, mode='ask') and show question_for_student\n"
-        "2. If student says 'auto': call configure_reactions(process_data, mode='auto')\n"
-        "   — auto falls back to manual instructions automatically if it fails\n"
-        "3. If student says 'manual': call configure_reactions(process_data, mode='manual')\n"
-        "   and display the step-by-step GUI instructions\n\n"
+        "Guide the user through the 5-stage design workflow. "
+        "After EACH stage, present a summary and ask: "
+        "'Does this look correct? Approve to proceed or tell me what to change.'\n\n"
+        "STAGE 1 — BRIEF: Parse the user's request with parse_process_request. "
+        "Confirm capacity, product, feed, and constraints.\n\n"
+        "STAGE 2 — ROUTES: Use lookup_chemical_process (or search_chemical_process "
+        "for unknowns). Present 2-3 chemistry routes with tradeoffs. "
+        "User picks one.\n\n"
+        "STAGE 3 — THERMO: Confirm compound list and property package "
+        "(PR, SRK, NRTL, etc.). Explain the choice.\n\n"
+        "STAGE 4 — BLOCK FLOW: Summarise the process as a numbered block-flow "
+        "description (no DWSIM yet). Confirm topology.\n\n"
+        "STAGE 5 — DWSIM PFD: Build the flowsheet with build_flowsheet_no_sim, "
+        "then call export_flowsheet_image to get the PFD image. "
+        "Return both the .dwxmz file path and the image path. "
+        "The user opens the .dwxmz in DWSIM, sets stream conditions, and presses Solve.\n\n"
+        "REACTION SETUP (inside Stage 5): always call configure_reactions with "
+        "mode='ask' first, then follow user's choice (auto or manual).\n\n"
         "Use prompt templates: 'Design Chemical Process', 'Configure Reactions', "
-        "'PFD to DWSIM File', 'Compare Two Processes'."
+        "'Compare Two Processes'."
     ),
 )
 
@@ -233,181 +211,11 @@ def parse_process_request(
         "merged_process": merged,
         "next_steps": (
             "If 'in_library' is True, use the merged_process directly with "
-            "build_process_from_library or generate_pfd. "
+            "build_flowsheet_no_sim (Stage 5). "
             "If False, use search_chemical_process or build_custom_process "
             "to create the process definition."
         ),
     }
-
-
-@mcp.tool()
-def extract_pfd_from_image(
-    image_path: Annotated[str | None, Field(
-        description=(
-            "Path to the PFD image file on disk (PNG, JPG, PDF). "
-            "Omit or pass null if the user uploaded the image directly into the chat — "
-            "Claude already has the image in context and will read it without a file path."
-        )
-    )] = None,
-    chemical_name: Annotated[str, Field(
-        description="Name of the target chemical (helps with validation)."
-    )] = "",
-    thermo_model: Annotated[str, Field(
-        description="Thermodynamic model to use (default: Peng-Robinson)."
-    )] = "Peng-Robinson",
-) -> dict:
-    """
-    Extract process data from a PFD (Process Flow Diagram) image.
-
-    Supports two input modes:
-    - File path: user provides a path to a saved image → pass it as image_path
-    - Direct upload: user drags/pastes the image into the chat → omit image_path;
-      Claude already has the image in its context and reads it directly.
-
-    Returns:
-    1. extraction_prompt  — the vision prompt Claude should apply to the image
-    2. empty_template     — the structured template to fill in with extracted data
-    3. instructions       — step-by-step guide for the rest of the workflow
-
-    After calling this tool, Claude must:
-    - Read the image (from path or from chat context)
-    - Apply extraction_prompt to identify all unit ops, streams, and connections
-    - Fill empty_template with the extracted data
-    - Call validate_pfd_data with the filled template
-    """
-    prompt = _pfd.get_extraction_prompt()
-    template = _ws.get_empty_template()
-
-    if image_path:
-        read_instruction = f"1. Read the image at '{image_path}' using the Read tool"
-    else:
-        read_instruction = (
-            "1. The image was uploaded directly into the chat — "
-            "use it from your current context (no Read tool needed)"
-        )
-
-    return {
-        "extraction_prompt": prompt,
-        "empty_template": template,
-        "image_path": image_path,
-        "image_source": "file_path" if image_path else "chat_upload",
-        "chemical_name": chemical_name,
-        "thermo_model": thermo_model,
-        "instructions": (
-            f"{read_instruction}\n"
-            "2. Apply the extraction_prompt to the image to identify all unit ops, "
-            "streams, and connections\n"
-            "3. Fill in the empty_template with what you extracted\n"
-            "4. Call validate_pfd_data with the filled template\n"
-            "5. Use the validated data with build_dwsim_from_pfd"
-        ),
-    }
-
-
-@mcp.tool()
-def validate_pfd_data(
-    extracted_data: Annotated[dict, Field(
-        description="The PFD data extracted by Claude from the image."
-    )],
-    chemical_name: Annotated[str, Field(
-        description="Target chemical name."
-    )] = "",
-    thermo_model: Annotated[str, Field(
-        description="Thermodynamic model to use."
-    )] = "Peng-Robinson",
-) -> dict:
-    """
-    Validate and clean PFD data extracted from an image.
-
-    Checks unit operation types, stream tags, connections, and normalizes
-    equipment type names to DWSIM-compatible values.
-
-    Returns the cleaned data ready for simulation, plus any warnings.
-    """
-    validation = _pfd.validate_extracted_pfd(extracted_data)
-    process_dict = _pfd.pfd_to_process_dict(
-        validation["cleaned_data"],
-        chemical_name=chemical_name,
-        thermo_model=thermo_model,
-    )
-    return {
-        "valid": validation["valid"],
-        "warnings": validation["warnings"],
-        "process_data": process_dict,
-    }
-
-
-# ─────────────────────────────────────────────
-# PFD GENERATION TOOLS
-# ─────────────────────────────────────────────
-
-@mcp.tool()
-def generate_pfd(
-    chemical: Annotated[str, Field(
-        description=(
-            "Chemical name to generate PFD for. "
-            "Must be in the library or provide process_data directly."
-        )
-    )],
-    output_dir: Annotated[str | None, Field(
-        description="Directory to save PFD files (DOT + PNG). Default: outputs/"
-    )] = None,
-) -> dict:
-    """
-    Generate a Process Flow Diagram for a chemical process in multiple formats.
-
-    Always returns:
-    - text_pfd:    ASCII art PFD — show this in a code block in chat
-    - mermaid_pfd: Mermaid flowchart — paste in a ```mermaid block to render
-    - svg_pfd:     Full SVG source — save as .svg and open in any browser
-    - svg_path:    path to the saved .svg file
-    - dot_source:  Graphviz DOT source
-    - dot_path:    path to saved .dot file
-    - png_path:    path to rendered PNG (only if graphviz is installed)
-
-    The SVG is the most portable download format: no dependencies, opens in
-    Chrome/Edge/Firefox and can be imported into Visio/PowerPoint/Word.
-    """
-    process_data = _lib.lookup_process(chemical)
-    if not process_data.get("found"):
-        return {
-            "success": False,
-            "error": f"Chemical '{chemical}' not found in library.",
-            "available": _lib.list_available_processes(),
-        }
-
-    out = output_dir or os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "outputs"
-    )
-    result = _pfg.generate_pfd(process_data, out)
-    result["success"] = True
-    return result
-
-
-@mcp.tool()
-def generate_pfd_from_data(
-    process_data: Annotated[dict, Field(
-        description=(
-            "Process data dict (from parse_process_request, validate_pfd_data, "
-            "or build_custom_process). Must have unit_operations, streams, connections."
-        )
-    )],
-    output_dir: Annotated[str | None, Field(
-        description="Directory to save PFD files. Default: outputs/"
-    )] = None,
-) -> dict:
-    """
-    Generate a PFD from arbitrary process data (not just library chemicals).
-
-    Use this after building a custom process or extracting from a PFD image.
-    Returns text PFD + graphviz DOT source + file paths.
-    """
-    out = output_dir or os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "outputs"
-    )
-    result = _pfg.generate_pfd(process_data, out)
-    result["success"] = True
-    return result
 
 
 # ─────────────────────────────────────────────
@@ -517,274 +325,6 @@ def build_custom_process(
         streams=streams,
         connections=[tuple(c) for c in connections],
         notes=notes,
-    )
-
-
-# ─────────────────────────────────────────────
-# REPORTING TOOLS
-# ─────────────────────────────────────────────
-
-@mcp.tool()
-def generate_mass_balance(
-    stream_results: Annotated[dict, Field(
-        description=(
-            "Stream results dict from get_stream_results(). "
-            "Keys are stream tags, values have T_K, P_Pa, mass_flow_kg_hr, "
-            "mole_fractions, mass_fractions."
-        )
-    )],
-    compounds: Annotated[list[str], Field(
-        description="List of compound names in the simulation."
-    )],
-) -> dict:
-    """
-    Generate formatted mass balance tables from simulation results.
-
-    Returns:
-    - overall_table: formatted text table showing T, P, flow, composition for all streams
-    - component_table: formatted text table showing mass flow of each compound per stream
-    - data: structured dict with computed component flows and totals
-
-    Present both tables to the student for their CPD assignment.
-    """
-    overall = _bal.format_mass_balance(stream_results, compounds)
-    component = _bal.format_component_balance(stream_results, compounds)
-    data = _bal.compute_mass_balance_data(stream_results, compounds)
-
-    return {
-        "overall_table": overall,
-        "component_table": component,
-        "data": data,
-    }
-
-
-@mcp.tool()
-def generate_energy_balance(
-    unit_op_results: Annotated[dict, Field(
-        description=(
-            "Unit op results dict from get_unit_op_results(). "
-            "Keys are equipment tags, values have duty_kW, delta_P_Pa, etc."
-        )
-    )],
-    process_data: Annotated[dict | None, Field(
-        description="Optional process data dict for equipment names/purposes."
-    )] = None,
-) -> dict:
-    """
-    Generate formatted energy balance table from simulation results.
-
-    Returns:
-    - table: formatted text table with equipment duties, ΔP, and energy summary
-    - data: structured dict with heating/cooling/work totals and
-            heat integration potential
-
-    The energy summary includes:
-    - Total heating duty (kW)
-    - Total cooling duty (kW)
-    - Total shaft work (kW)
-    - Net energy input (kW)
-    - Heat integration potential (kW)
-    """
-    table = _bal.format_energy_balance(unit_op_results, process_data)
-    data = _bal.compute_energy_balance_data(unit_op_results, process_data)
-
-    return {
-        "table": table,
-        "data": data,
-    }
-
-
-@mcp.tool()
-def generate_full_report(
-    chemical: Annotated[str, Field(
-        description="Chemical name (used to look up process data)."
-    )],
-    stream_results: Annotated[dict | None, Field(
-        description="Stream results from simulation (optional — omit for pre-simulation report)."
-    )] = None,
-    unit_op_results: Annotated[dict | None, Field(
-        description="Unit op results from simulation (optional)."
-    )] = None,
-) -> dict:
-    """
-    Generate a comprehensive simulation report with process overview,
-    mass balance, and energy balance.
-
-    Can be called:
-    - WITHOUT simulation results → generates a pre-simulation summary
-    - WITH simulation results → generates a full post-simulation report
-
-    Returns a formatted report string suitable for display to students.
-    """
-    process_data = _lib.lookup_process(chemical)
-    if not process_data.get("found"):
-        return {"success": False, "error": f"Chemical '{chemical}' not found."}
-
-    report = _bal.format_summary_report(
-        process_data,
-        stream_results=stream_results,
-        unit_op_results=unit_op_results,
-    )
-
-    result: dict = {
-        "success": True,
-        "report": report,
-    }
-
-    # Add balance tables if results provided
-    if stream_results:
-        compounds = process_data.get("compounds", [])
-        result["mass_balance_table"] = _bal.format_mass_balance(
-            stream_results, compounds
-        )
-        result["component_balance_table"] = _bal.format_component_balance(
-            stream_results, compounds
-        )
-
-    if unit_op_results:
-        result["energy_balance_table"] = _bal.format_energy_balance(
-            unit_op_results, process_data
-        )
-
-    return result
-
-
-@mcp.tool()
-def generate_full_report_from_data(
-    process_data: Annotated[dict, Field(
-        description="Process data dict (from library, web search, or PFD extraction)."
-    )],
-    stream_results: Annotated[dict | None, Field(
-        description="Stream results from simulation (optional)."
-    )] = None,
-    unit_op_results: Annotated[dict | None, Field(
-        description="Unit op results from simulation (optional)."
-    )] = None,
-) -> dict:
-    """
-    Generate a full report from arbitrary process data (not just library chemicals).
-
-    Same as generate_full_report but accepts custom process data directly.
-    """
-    report = _bal.format_summary_report(
-        process_data,
-        stream_results=stream_results,
-        unit_op_results=unit_op_results,
-    )
-
-    result: dict = {"success": True, "report": report}
-
-    if stream_results:
-        compounds = process_data.get("compounds", [])
-        result["mass_balance_table"] = _bal.format_mass_balance(
-            stream_results, compounds
-        )
-        result["component_balance_table"] = _bal.format_component_balance(
-            stream_results, compounds
-        )
-
-    if unit_op_results:
-        result["energy_balance_table"] = _bal.format_energy_balance(
-            unit_op_results, process_data
-        )
-
-    return result
-
-
-# ─────────────────────────────────────────────
-# EXCEL EXPORT TOOLS
-# ─────────────────────────────────────────────
-
-@mcp.tool()
-def export_mass_balance_excel(
-    stream_results: Annotated[dict, Field(
-        description=(
-            "Stream results dict from get_stream_results(). "
-            "Keys are stream tags, values have T_K, P_Pa, mass_flow_kg_hr, "
-            "mole_fractions, mass_fractions."
-        )
-    )],
-    compounds: Annotated[list[str], Field(
-        description="Ordered list of compound names matching the simulation."
-    )],
-    output_dir: Annotated[str | None, Field(
-        description="Directory to save the .xlsx file. Default: outputs/"
-    )] = None,
-    filename: Annotated[str, Field(
-        description="Output filename. Default: mass_balance.xlsx"
-    )] = "mass_balance.xlsx",
-) -> dict:
-    """
-    Export stream simulation results to a formatted Excel (.xlsx) workbook.
-
-    Produces three sheets in the standard academic ChE format:
-    - Stream Summary : T (°C), P (bar), total flow (kg/hr) per stream
-    - Mass Balance   : component mass flows (kg/hr) per stream, with row totals
-    - Mole Fractions : mole fractions per compound per stream
-
-    The file can be submitted directly for a CPD assignment. No extra formatting
-    required — headers, borders, and alternating row colours are applied.
-
-    Returns the file path of the saved .xlsx.
-    """
-    return _excel.generate_mass_balance_excel(
-        stream_results=stream_results,
-        compounds=compounds,
-        output_dir=output_dir or os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "outputs"
-        ),
-        filename=filename,
-    )
-
-
-@mcp.tool()
-def export_full_balance_excel(
-    stream_results: Annotated[dict, Field(
-        description="Stream results from get_stream_results()."
-    )],
-    unit_op_results: Annotated[dict, Field(
-        description="Unit op results from get_unit_op_results()."
-    )],
-    compounds: Annotated[list[str], Field(
-        description="Ordered list of compound names."
-    )],
-    process_data: Annotated[dict | None, Field(
-        description=(
-            "Optional process data dict (from library or build_custom_process). "
-            "Enables the Process Overview sheet with reactions and unit op table."
-        )
-    )] = None,
-    output_dir: Annotated[str | None, Field(
-        description="Directory to save the .xlsx file. Default: outputs/"
-    )] = None,
-    filename: Annotated[str | None, Field(
-        description="Output filename. Default: <chemical>_full_balance.xlsx"
-    )] = None,
-) -> dict:
-    """
-    Export a complete simulation report to a multi-sheet Excel workbook.
-
-    Sheets included:
-    - Stream Summary   : T, P, total flow per stream
-    - Mass Balance     : component mass flows (kg/hr) with totals
-    - Mole Fractions   : per-compound mole fractions
-    - Energy Balance   : duty (kW), ΔP, outlet T for each unit operation
-                         plus an energy summary block (heating / cooling / work)
-    - Process Overview : compound list, thermo model, reactions, unit op table
-                         (only if process_data is provided)
-
-    Use this after a successful simulation to generate a submission-ready
-    engineering report file.
-    """
-    return _excel.generate_full_balance_excel(
-        stream_results=stream_results,
-        unit_op_results=unit_op_results,
-        compounds=compounds,
-        process_data=process_data,
-        output_dir=output_dir or os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "outputs"
-        ),
-        filename=filename,
     )
 
 
@@ -983,6 +523,30 @@ def save_flowsheet(
 
 
 @mcp.tool()
+def export_flowsheet_image(
+    output_path: Annotated[str | None, Field(
+        description=(
+            "Destination file path for the exported image (.png or .svg). "
+            "Defaults to outputs/flowsheet_pfd.png. "
+            "Call save_flowsheet first so the Xvfb strategy has a file to work from."
+        )
+    )] = None,
+) -> dict:
+    """
+    Export the current DWSIM flowsheet as an image (PNG preferred, SVG fallback).
+
+    Tries three strategies in order:
+    1. Native DWSIM FlowsheetSurface.SaveAsBitmap (requires GUI surface)
+    2. Xvfb headless screenshot via subprocess (Linux / Docker worker)
+    3. SVG fallback rendered from registered object positions
+
+    Returns image_path (show this to the user) and strategy used.
+    Always call save_flowsheet before this tool so the file is persisted.
+    """
+    return _dwsim.export_flowsheet_image(output_path)
+
+
+@mcp.tool()
 def build_process_from_library(
     chemical: Annotated[str, Field(
         description=(
@@ -1131,89 +695,6 @@ def list_flowsheet_objects() -> dict:
     """
     return _dwsim.list_existing_objects()
 
-
-@mcp.tool()
-def build_dwsim_from_pfd(
-    process_data: Annotated[dict, Field(
-        description=(
-            "Process data dict from validate_pfd_data or build_custom_process. "
-            "Must contain: compounds, thermo_model, unit_operations, streams, connections. "
-            "CRITICAL for connections: every connection must route through a named stream tag. "
-            "Never write [unit_op, unit_op] — always [unit_op, stream] and [stream, unit_op]. "
-            "Every stream in the 'streams' list must appear in at least one connection pair."
-        )
-    )],
-    output_dir: Annotated[str | None, Field(
-        description=(
-            "Directory where the .dwxmz file will be saved. "
-            "Defaults to the 'outputs/' folder in the project directory."
-        )
-    )] = None,
-) -> dict:
-    """
-    Build a DWSIM flowsheet topology from extracted PFD data — WITHOUT running simulation.
-
-    This is the core PFD-upload workflow:
-    1. Student uploads a hand-drawn or digital PFD image
-    2. Claude extracts topology with extract_pfd_from_image + validate_pfd_data
-    3. Claude confirms the understood topology with the student
-    4. This tool builds the .dwxmz file with all units placed and connected
-    5. Student opens the file in DWSIM GUI, sets stream conditions, presses Solve
-
-    No simulation is run — so convergence problems cannot block the student.
-    The file is ready for the student to configure and solve themselves.
-
-    Returns:
-    - success: whether the file was built and saved
-    - file_path: absolute path of the saved .dwxmz
-    - topology_summary: human-readable text summary of what was built
-    - unit_operations, streams, connections: structured topology data
-    - next_steps: instructions for the student
-    """
-    default_output = output_dir or os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "outputs"
-    )
-
-    # Pre-flight: auto-fix unit→unit connections using stream metadata.
-    # This catches the common case where Claude sends [unit_op, unit_op]
-    # instead of routing through named streams.
-    stream_tags = {s.get("name") or s.get("tag") for s in process_data.get("streams", [])}
-    unit_tags = {op.get("name") for op in process_data.get("unit_operations", [])}
-    raw_conns = process_data.get("connections", [])
-    fixed_conns = []
-    warnings = []
-    for conn in raw_conns:
-        if not isinstance(conn, (list, tuple)) or len(conn) < 2:
-            continue
-        a, b = str(conn[0]), str(conn[1])
-        if len(conn) == 3:
-            # Triplet [unit, stream, unit] — expand
-            fixed_conns.append([a, str(conn[1])])
-            fixed_conns.append([str(conn[1]), str(conn[2])])
-            continue
-        # If both sides are unit ops, try to find a bridging stream
-        if a in unit_tags and b in unit_tags and a not in stream_tags and b not in stream_tags:
-            bridging = None
-            for s in process_data.get("streams", []):
-                stag = s.get("name") or s.get("tag")
-                if s.get("from_unit") == a and s.get("to_unit") == b:
-                    bridging = stag
-                    break
-            if bridging:
-                fixed_conns.append([a, bridging])
-                fixed_conns.append([bridging, b])
-                warnings.append(f"Auto-fixed: [{a}, {b}] → [{a}, {bridging}] + [{bridging}, {b}]")
-            else:
-                fixed_conns.append([a, b])  # let connect_objects create AUTO_S
-                warnings.append(f"Unit→unit connection [{a}, {b}]: auto-stream will be created")
-        else:
-            fixed_conns.append([a, b])
-    process_data = dict(process_data, connections=fixed_conns)
-
-    result = _dwsim.build_flowsheet_no_sim(process_data, default_output)
-    if warnings:
-        result["connection_fixup_warnings"] = warnings
-    return result
 
 
 @mcp.tool()
@@ -1547,62 +1028,6 @@ Follow this workflow:
 4. **After reactions are configured:**
    Call `run_simulation()` and report results.
    If the reactor stays red (unsolved), offer to show manual instructions again.
-"""
-
-
-@mcp.prompt(title="PFD to DWSIM File")
-def pfd_to_dwsim_prompt(image_path: str = "", chemical_name: str = "") -> str:
-    """Generate a structured prompt to guide Claude through the PFD-upload → DWSIM file workflow."""
-    chem_hint = f" for {chemical_name}" if chemical_name else ""
-    chem_arg = f', "{chemical_name}"' if chemical_name else ""
-
-    if image_path:
-        image_context = f"Image path: {image_path}"
-        extract_call = f'`extract_pfd_from_image("{image_path}"{chem_arg})`'
-        image_note = f"Then read the image at `{image_path}` using the Read tool."
-    else:
-        image_context = "Image source: uploaded directly into this chat"
-        extract_call = f'`extract_pfd_from_image({chem_arg.lstrip(", ")})`' if chemical_name else "`extract_pfd_from_image()`"
-        image_note = "The image is already in your context — read it directly, no file path needed."
-
-    return f"""Convert this PFD image into a ready-to-open DWSIM flowsheet file{chem_hint}.
-
-{image_context}
-
-Please follow these steps exactly:
-
-1. **Extract the PFD topology**
-   Call {extract_call} to get the extraction prompt and template.
-   {image_note}
-   Fill in the template with every unit operation, stream, and connection you can identify.
-
-   **Connection format rule (critical for wiring to work):**
-   Every connection must go THROUGH a named stream tag — never connect unit-op to unit-op directly.
-   Use pairs: `["S-01", "MIX-101"]` (stream→unit) and `["MIX-101", "S-02"]` (unit→stream).
-   Every stream you list must appear in at least one connection pair.
-   Example for a 3-unit chain with 4 streams:
-     `[["S-01","MIX-101"], ["MIX-101","S-02"], ["S-02","H-101"], ["H-101","S-03"], ...]`
-
-2. **Validate the extracted data**
-   Call `validate_pfd_data(extracted_data{chem_arg})` to clean and normalise the data.
-
-3. **Confirm the topology with the student**
-   Show a clear text summary of what you understood:
-   - List every unit operation (tag, type, purpose)
-   - List every stream (tag, from → to)
-   - List every connection
-   Ask: "Does this match your PFD? Should I correct anything before building the DWSIM file?"
-
-4. **Build the DWSIM file** (only after student confirms)
-   Call `build_dwsim_from_pfd(process_data)` to create the .dwxmz file with all units placed and connected.
-   Do NOT run the simulation — the student will set stream conditions and solve it themselves.
-
-5. **Hand off to the student**
-   Report the saved file path and give clear instructions:
-   - Open the .dwxmz in DWSIM
-   - Set T, P, flow, and composition on each feed stream
-   - Add any reactions in the Reactions Manager if needed
-   - Press Solve (F5)
 """
 
 
