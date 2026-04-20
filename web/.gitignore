@@ -3,3 +3,5 @@ node_modules/
 out/
 .env.local
 .env*.local
+tsconfig.tsbuildinfo
+next-env.d.ts
