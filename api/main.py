@@ -31,6 +31,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from api import gating, session as _sess, bundler
@@ -48,6 +49,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Serve generated PFD images / .dwxmz files so the frontend can display them
+_OUTPUTS_DIR = os.path.join(os.path.dirname(__file__), "..", "outputs")
+os.makedirs(_OUTPUTS_DIR, exist_ok=True)
+app.mount("/outputs", StaticFiles(directory=_OUTPUTS_DIR), name="outputs")
 
 
 # ── Pydantic request bodies ────────────────────────────────────────────────────
