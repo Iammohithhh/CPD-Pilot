@@ -4,16 +4,14 @@ version: "3.9"
 #
 # Services:
 #   api      — FastAPI + DWSIM worker (port 8000)
-#
-# Future services (uncomment when ready):
-#   web      — Next.js frontend (port 3000)
-#   redis    — session cache / task queue
+#   web      — Next.js frontend     (port 3000)
 #
 # Quick start:
 #   cp .env.example .env          # add your ANTHROPIC_API_KEY
 #   docker compose up --build
 #
-# The API docs are then available at http://localhost:8000/docs
+# UI:  http://localhost:3000
+# API: http://localhost:8000/docs
 
 services:
 
@@ -42,6 +40,24 @@ services:
       retries: 3
       start_period: 30s
 
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+    image: cpd-pilot-web:latest
+    container_name: cpd-pilot-web
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # Runtime env (overrides build-time bake; used by server components only)
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      api:
+        condition: service_healthy
+
   # ── Uncomment to add Redis for task queuing ──────────────────────────────────
   # redis:
   #   image: redis:7-alpine
@@ -51,21 +67,6 @@ services:
   #     - "6379:6379"
   #   volumes:
   #     - redis_data:/data
-
-  # ── Uncomment when the Next.js web app is ready ──────────────────────────────
-  # web:
-  #   build:
-  #     context: ./web
-  #     dockerfile: Dockerfile
-  #   container_name: cpd-pilot-web
-  #   restart: unless-stopped
-  #   ports:
-  #     - "3000:3000"
-  #   environment:
-  #     - NEXT_PUBLIC_API_URL=http://api:8000
-  #   depends_on:
-  #     api:
-  #       condition: service_healthy
 
 volumes:
   cpd_outputs:
