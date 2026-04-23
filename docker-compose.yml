@@ -1,0 +1,73 @@
+version: "3.9"
+
+# ── CPD-Pilot full stack ───────────────────────────────────────────────────────
+#
+# Services:
+#   api      — FastAPI + DWSIM worker (port 8000)
+#   web      — Next.js frontend     (port 3000)
+#
+# Quick start:
+#   cp .env.example .env          # add your ANTHROPIC_API_KEY
+#   docker compose up --build
+#
+# UI:  http://localhost:3000
+# API: http://localhost:8000/docs
+
+services:
+
+  api:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+      args:
+        DWSIM_VERSION: "8.8.7"
+    image: cpd-pilot-api:latest
+    container_name: cpd-pilot-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - DWSIM_PATH=/opt/dwsim
+      - PYTHONPATH=/app
+    volumes:
+      # Persist generated files (.dwxmz, images, session DB) outside the container
+      - cpd_outputs:/app/outputs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+    image: cpd-pilot-web:latest
+    container_name: cpd-pilot-web
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # Runtime env (overrides build-time bake; used by server components only)
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      api:
+        condition: service_healthy
+
+  # ── Uncomment to add Redis for task queuing ──────────────────────────────────
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: cpd-redis
+  #   restart: unless-stopped
+  #   ports:
+  #     - "6379:6379"
+  #   volumes:
+  #     - redis_data:/data
+
+volumes:
+  cpd_outputs:
+  # redis_data:

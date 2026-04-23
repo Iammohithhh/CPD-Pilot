@@ -17,3 +17,6 @@ outputs/*.xlsx
 outputs/*.svg
 .env
 *.log
+outputs/sessions.db
+.pytest_cache/
+.ruff_cache/
